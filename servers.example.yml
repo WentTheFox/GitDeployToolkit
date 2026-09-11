@@ -1,0 +1,29 @@
+# Server inventory (copy to servers.local.yml, which is gitignored)
+#
+# Nothing in this toolkit's scripts reads this file — it's just a place to
+# jot down which real host is which, since that's not derivable from the
+# code itself. Keep your actual hostnames/paths here instead of in any
+# tracked file. Hosts are resolved by name only (/etc/hosts), so no IPs
+# needed here.
+
+server-a.example:
+  os: Debian 12
+  runtime: nginx + php-fpm + pm2
+  toolkit_status: not migrated   # or: migrated, or omit if unset
+  apps:
+    - name: myapp
+      manager: pm2
+    - name: another-app
+      manager: systemd
+  notes: []
+
+pi.example:
+  os: Raspbian
+  runtime: docker compose
+  toolkit_status: not attempted
+  apps:
+    - name: homelab
+      manager: docker-compose
+      repo: github.com/example/homelab
+  notes:
+    - not a deploy target currently

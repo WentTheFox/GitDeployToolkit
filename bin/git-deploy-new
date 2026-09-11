@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Set up a new app for push-to-deploy on this server:
+#   - creates the bare repo
+#   - creates the worktree directory
+#   - writes deploy.env (server-side, just says where to check out)
+#   - symlinks hooks/post-receive to the shared toolkit hook
+#
+# Usage: git-deploy-new <app-name> [worktree-path] [branch]
+
+set -euo pipefail
+
+TOOLKIT_LIB="${GIT_DEPLOY_LIB:-/usr/local/lib/git-deploy}"
+REPO_ROOT="${GIT_DEPLOY_REPO_ROOT:-/srv/git}"
+
+APP_NAME="${1:?Usage: git-deploy-new <app-name> [worktree-path] [branch]}"
+WORKTREE="${2:-/var/www/$APP_NAME}"
+BRANCH="${3:-main}"
+
+BARE_REPO="$REPO_ROOT/$APP_NAME.git"
+
+if [[ -e "$BARE_REPO" ]]; then
+  echo "git-deploy-new: $BARE_REPO already exists, aborting" >&2
+  exit 1
+fi
+
+if [[ ! -f "$TOOLKIT_LIB/post-receive" ]]; then
+  echo "git-deploy-new: $TOOLKIT_LIB/post-receive not found — run install.sh first" >&2
+  exit 1
+fi
+
+mkdir -p "$REPO_ROOT" "$WORKTREE"
+git init --quiet --bare "$BARE_REPO"
+
+cat > "$BARE_REPO/deploy.env" <<EOF
+WORKTREE=$WORKTREE
+BRANCH=$BRANCH
+EOF
+
+ln -sf "$TOOLKIT_LIB/post-receive" "$BARE_REPO/hooks/post-receive"
+chmod +x "$TOOLKIT_LIB/post-receive"
+
+echo "git-deploy-new: created $BARE_REPO"
+echo "git-deploy-new: worktree -> $WORKTREE (branch: $BRANCH)"
+echo
+echo "On your dev machine:"
+echo "  git remote add deploy ssh://$(whoami)@$(hostname -f 2>/dev/null || hostname)$BARE_REPO"
+echo "  git push deploy $BRANCH"
+echo
+echo "In the app's repo, copy template/deploy.conf.example to deploy.conf,"
+echo "fill in deploy_build/deploy_restart, and commit it."

@@ -1,0 +1,42 @@
+# Copy this file to deploy.conf at the ROOT of your app's repo and commit
+# it. It's sourced (as bash) by the shared post-receive hook, with cwd set
+# to the freshly checked-out worktree, right after every push to the
+# deploy branch (default: main).
+#
+# Both functions are optional — define whichever your app needs.
+# Untracked files (.env, node_modules, vendor, storage/, etc.) are left
+# alone by the checkout, so it's safe to keep persistent per-server state
+# there — just make sure it's gitignored.
+#
+# Both functions also see $WORKTREE, $BRANCH, $GIT_DIR, and the commit
+# range just pushed ($oldrev/$newrev — $oldrev is all-zeros on the first
+# push), so deploy_restart can make a restart decision based on what
+# changed, e.g. `git --git-dir="$GIT_DIR" diff --name-only "$oldrev"
+# "$newrev"`. See deploy.conf.graceful-respawn.example for a long-lived
+# process (e.g. a discord.js ShardingManager) that only needs a full
+# restart when its own entry-point code changes, and can otherwise
+# signal itself to reload gracefully.
+
+# --- PHP-FPM example -------------------------------------------------
+deploy_build() {
+  composer install --no-dev --optimize-autoloader --no-interaction
+}
+
+deploy_restart() {
+  sudo systemctl restart php-fpm-myapp
+}
+
+# --- Node / pm2 example -----------------------------------------------
+# deploy_build() {
+#   npm ci
+#   npm run build
+# }
+#
+# deploy_restart() {
+#   pm2 reload myapp
+# }
+
+# Notes on sudo:
+# deploy_restart commands that need root (systemctl, etc.) require the
+# deploy user to have passwordless sudo for exactly that command. See
+# README.md for a sudoers snippet that scopes this narrowly.

@@ -1,0 +1,71 @@
+# Copy this file to deploy.conf at the ROOT of your app's repo and commit
+# it. See deploy.conf.example first for the basics — this variant is for
+# a long-lived process that has its OWN graceful-reload mechanism (a
+# signal handler, an admin socket, whatever) and where a full restart is
+# only actually necessary when the long-lived process's own code changes.
+#
+# Motivating case: a discord.js bot run via discord.js's ShardingManager.
+# Discord's identify rate limit forces shards to spawn sequentially
+# (~5s apart), so a full `pm2 restart` on a many-shard bot means the
+# WHOLE bot is down for minutes. discord.js's `manager.respawnAll()`
+# instead respawns shards one at a time on the *existing* manager
+# process (PID unchanged) — at most one shard briefly down (~3-4s) at
+# any moment. So: only fully restart when code the long-lived manager
+# process itself runs has changed; otherwise just signal it to respawn.
+# The same shape applies to anything else with a graceful-reload path
+# (a supervisor process, a long-lived worker with a SIGHUP handler, etc).
+#
+# This needs the app to define its own reload trigger — for the
+# ShardingManager case, that's a signal handler in the manager's entry
+# point, e.g. in src/index.ts:
+#
+#   process.on('SIGUSR2', () => { manager.respawnAll(); });
+#
+# If the bot is on @went.tf/discord-bot-framework >= 2.4.0, the handler
+# above is built into createShardManager() — pass
+# `gracefulRespawnSignal: 'SIGUSR2'` and skip hand-rolling it. The
+# deploy-side half below (MANAGER_FILES diff + kill -s USR2) is unchanged
+# either way.
+#
+# Available here (sourced from the shared hook, cwd = the worktree):
+#   $WORKTREE, $BRANCH        - from deploy.env
+#   $GIT_DIR                  - the bare repo, for git commands below
+#   $oldrev, $newrev           - the commit range just pushed (oldrev is
+#                                all-zeros on the very first push)
+
+APP_NAME=myapp
+MANAGER_FILES='^(package\.json|package-lock\.json|src/index\.ts)$'
+
+deploy_build() {
+  npm ci
+  npm run build
+  # Slash-command / other startup-data sync needs to run on every deploy
+  # regardless of restart strategy — keep it out of index.ts's own boot
+  # so it doesn't require a full manager restart to take effect.
+  npm run sync-commands
+}
+
+deploy_restart() {
+  local changed_files=""
+  if [[ "$oldrev" != "0000000000000000000000000000000000000000" ]]; then
+    changed_files=$(git --git-dir="$GIT_DIR" diff --name-only "$oldrev" "$newrev")
+  fi
+
+  if [[ -z "$changed_files" ]] || grep -qE "$MANAGER_FILES" <<< "$changed_files"; then
+    echo "git-deploy: manager-critical files changed (or initial deploy), full restart"
+    pm2 restart "$APP_NAME"
+    return
+  fi
+
+  local pid
+  pid=$(pm2 pid "$APP_NAME" 2>/dev/null || true)
+  if [[ -z "$pid" ]]; then
+    echo "git-deploy: $APP_NAME not running under pm2, falling back to full restart" >&2
+    pm2 restart "$APP_NAME"
+    return
+  fi
+
+  echo "git-deploy: no manager-critical changes, signaling $APP_NAME (pid $pid) to respawn shards"
+  # dash's `kill` builtin doesn't accept bash's `-SIGUSR2` syntax, use `-s`
+  kill -s USR2 "$pid"
+}

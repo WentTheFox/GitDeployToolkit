@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Generic post-receive hook, shared by every app on this server.
+# Installed once by install.sh and symlinked from each bare repo's
+# hooks/post-receive by `git-deploy-new`. Never edit a per-app copy —
+# edit this file (or update the toolkit) and every app picks it up.
+#
+# Per-app behavior comes from two files, read at deploy time:
+#   $GIT_DIR/deploy.env   (server-side, created by git-deploy-new)
+#     WORKTREE=/var/www/myapp
+#     BRANCH=main                # optional, defaults to main
+#   $WORKTREE/deploy.conf        (in the app's own repo, versioned there)
+#     deploy_build()   { ... }   # optional
+#     deploy_restart() { ... }   # optional
+
+set -euo pipefail
+
+GIT_DIR=$(git rev-parse --git-dir)
+GIT_DIR=$(cd "$GIT_DIR" && pwd)
+ENV_FILE="$GIT_DIR/deploy.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "git-deploy: missing $ENV_FILE — run git-deploy-new to set this app up" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+: "${WORKTREE:?WORKTREE not set in $ENV_FILE}"
+: "${BRANCH:=main}"
+
+while read -r oldrev newrev ref; do
+  if [[ "$ref" != "refs/heads/$BRANCH" ]]; then
+    echo "git-deploy: ignoring push to $ref (this app deploys $BRANCH only)" >&2
+    continue
+  fi
+
+  if [[ "$newrev" == "0000000000000000000000000000000000000000" ]]; then
+    echo "git-deploy: branch $BRANCH deleted, not touching $WORKTREE" >&2
+    continue
+  fi
+
+  mkdir -p "$WORKTREE"
+  echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
+  git --work-tree="$WORKTREE" --git-dir="$GIT_DIR" checkout -f "$BRANCH"
+
+  APP_CONF="$WORKTREE/deploy.conf"
+  if [[ -f "$APP_CONF" ]]; then
+    # Run in a subshell so deploy_build/deploy_restart from a previous
+    # iteration (unlikely, but defensive) can't leak, and so `cd` here
+    # never affects the rest of the hook.
+    (
+      cd "$WORKTREE"
+      # shellcheck source=/dev/null
+      source "$APP_CONF"
+
+      if declare -f deploy_build > /dev/null; then
+        echo "git-deploy: running deploy_build"
+        deploy_build
+      fi
+
+      if declare -f deploy_restart > /dev/null; then
+        echo "git-deploy: running deploy_restart"
+        deploy_restart
+      fi
+    )
+  else
+    echo "git-deploy: no deploy.conf in repo root, skipping build/restart"
+  fi
+
+  echo "git-deploy: deployed $newrev to $WORKTREE"
+done

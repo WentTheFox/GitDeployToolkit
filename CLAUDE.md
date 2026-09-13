@@ -73,14 +73,20 @@ changes, it's the source of truth for the intended UX.
 - Toolkit is written and passed a local end-to-end smoke test (simulated
   bare repo + push in `/tmp`, verified checkout + `deploy_build` +
   `deploy_restart` all ran). See git log for that commit.
-- **One of the two VPSes is migrated and has two real apps on the
+- **One of the two VPSes is migrated and has three real apps on the
   toolkit:** `fantastick` (a pm2 app, two processes: App +
-  QueueWorker) and `pennycurve` (a single pm2 process). Both verified
-  with a real `git push deploy main` that ran `deploy_build`/
-  `deploy_restart` and restarted the live pm2 processes successfully.
-  See `servers.local.yml` (gitignored) for exactly which host, its
+  QueueWorker), `pennycurve` (a single pm2 process), and `when` (a
+  php-fpm-served Laravel app with a Horizon queue-worker systemd unit
+  that needs restarting on deploy). All three verified with a real
+  `git push deploy main` that ran `deploy_build`/`deploy_restart` and
+  left the app running/serving correctly afterward. See
+  `servers.local.yml` (gitignored) for exactly which host, its
   worktree/bare-repo paths, deploy user, and local clone paths for every
   app on it — not repeated here since this file is tracked.
+- A handful of other apps on that same VPS are intentionally **not**
+  being migrated (abandoned or otherwise a no-op, per the user) — see
+  `servers.local.yml` for which ones; don't propose migrating them
+  without being asked again.
 - The toolkit itself is installed on that VPS as a real git clone (not a
   tarball copy), tracking this repo's GitHub remote via a dedicated
   **read-only deploy key** generated on that server (not the user's
@@ -91,8 +97,8 @@ changes, it's the source of truth for the intended UX.
   attempted — per `servers.local.yml`, no app there obviously matches
   the `/var/www` or `/var/node` convention, needs investigation before
   migrating anything.
-- Next steps whenever the user wants to proceed: same recipe as
-  fantastick, applied one app at a time to the still-unmigrated VPS.
+- Next steps whenever the user wants to proceed: same recipe as the apps
+  above, applied one app at a time to the still-unmigrated VPS.
 
 ## Pitfalls hit during the first real migration (fantastick)
 
@@ -154,6 +160,31 @@ changes, it's the source of truth for the intended UX.
   in ~5-8s, before any real build step (GitHub had blocked
   `actions/cache@v2`/`checkout@v2`/`setup-node@v2` as deprecated). Check
   run history before assuming a deploy-toolkit change broke something.
+- **Check for an existing bespoke deploy script before writing
+  `deploy.conf` from scratch.** `when` already had its own
+  `setup/post-receive.sh` (a hand-rolled hook on a separate non-bare
+  `production` remote with `receive.denyCurrentBranch=updateInstead`) —
+  exactly the per-app-hook duplication this toolkit exists to replace,
+  and its own app-level `CLAUDE.md` even documented it under a "Deploy"
+  heading. It already encoded real, non-obvious decisions (conditional
+  composer/pnpm/build based on which files changed, respecting a
+  pre-existing manual maintenance window, not letting a build failure
+  leave the site stuck down) — porting it into `deploy_build`/
+  `deploy_restart` using `$oldrev`/`$newrev` diffing preserved all of
+  that instead of reinventing a thinner version. Always check the app's
+  own repo (`CLAUDE.md`, `setup/`, `.github/workflows/`, an old
+  non-bare `production`-style remote) for this before writing a new
+  `deploy.conf`.
+- **A build-failure path that must still leave the site running can't
+  just `set -e` its way through `deploy_build`.** The shared hook's
+  subshell inherits `set -euo pipefail`, so a raw failing command
+  inside `deploy_build` aborts immediately — fine for most apps, but
+  not for one that brackets `artisan down`/`up` around the build and
+  wants a failed build to still restart/come back up. Capture failure
+  in an `if cmd; then ok; else FAILED=1; fi` (never bare `set -e`-sensitive)
+  and defer the actual `return 1` to the very end of `deploy_restart`,
+  using a plain (non-`local`) variable so it survives from `deploy_build`
+  into `deploy_restart` — they run in the same sourced shell.
 
 ## Working conventions for this repo
 

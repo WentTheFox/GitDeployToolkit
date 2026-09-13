@@ -221,9 +221,9 @@ deploy mechanism if one existed:
 5. Note in `servers.local.yml` that this cleanup is done (or still
    pending) for that app, so it isn't silently re-discovered later.
 
-As of this note: `when` has been fully cleaned up this way. `fantastick`
-and `pennycurve` are confirmed to have the same leftover pattern and
-still need it — see `servers.local.yml`.
+As of this note: `when`, `fantastick`, and `pennycurve` have all been
+fully cleaned up this way — see `servers.local.yml` for exactly what
+was removed on each. Run this checklist on every future migration.
 
 ## Working conventions for this repo
 

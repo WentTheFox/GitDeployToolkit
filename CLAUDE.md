@@ -185,6 +185,45 @@ changes, it's the source of truth for the intended UX.
   and defer the actual `return 1` to the very end of `deploy_restart`,
   using a plain (non-`local`) variable so it survives from `deploy_build`
   into `deploy_restart` — they run in the same sourced shell.
+- **Every app migrated so far had the same leftover old-deploy pattern**
+  — not just `when` (see above): a stale `production` git remote in the
+  local clone pointing straight at the worktree, `receive.
+  denyCurrentBranch=updateInstead` still set in the worktree's own
+  `.git/config` on the server, a dangling `.git/hooks/post-receive`
+  symlink to a now-superseded bespoke script, and that script still
+  sitting in the app's repo. None of this breaks anything by staying
+  (nothing pushes to that non-bare repo directly once `production` is
+  removed from the local clone), but it's confusing dead weight. Treat
+  checking for and cleaning this up as **part of the migration**, not an
+  optional follow-up — see the checklist below.
+
+## Post-migration cleanup checklist (do this for every app, not just when asked)
+
+After `deploy.conf` is written and the first real deploy through the
+toolkit is verified working, check for and clean up the app's old
+deploy mechanism if one existed:
+
+1. In the app's local clone: `git remote -v` — remove any `production`
+   (or similarly named) remote pointing straight at a worktree path.
+2. On the server, in that worktree's own `.git`: check
+   `git config --get receive.denyCurrentBranch` and
+   `ls -la .git/hooks/post-receive` — unset the config and remove the
+   hook symlink if they're relics of the old push-directly-to-worktree
+   setup (this is a *different* `.git` from the toolkit's bare repo
+   under `/srv/git`, easy to forget it's even there).
+3. In the app's repo: delete the old hand-rolled deploy script the
+   symlink pointed to (e.g. `setup/post-receive.sh`), and update
+   `CLAUDE.md`/`README.md` if either documents the old flow — don't
+   leave docs describing a mechanism that no longer exists.
+4. Commit and push that removal to `origin`, then deploy it through
+   `deploy` too, so the server's checkout matches — confirm with the
+   user first, same as any other push to `deploy` for that app.
+5. Note in `servers.local.yml` that this cleanup is done (or still
+   pending) for that app, so it isn't silently re-discovered later.
+
+As of this note: `when` has been fully cleaned up this way. `fantastick`
+and `pennycurve` are confirmed to have the same leftover pattern and
+still need it — see `servers.local.yml`.
 
 ## Working conventions for this repo
 

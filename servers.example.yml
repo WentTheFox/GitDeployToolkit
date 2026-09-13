@@ -17,6 +17,17 @@
 # still identifies it. Say nothing identifying at all, or don't mention
 # it. servers.local.yml itself is gitignored, so the real name is still
 # fine to write right here.
+#
+# Freeform note text almost always ends up containing a ": " somewhere
+# (a URL, a ratio, a label) — as a bare `- some text: like this` list
+# item, that colon-space is parsed as a mapping key, not prose, and
+# breaks the file (YAML doesn't validate multi-line plain scalars the
+# way you'd expect — see this repo's actual git history for a real
+# instance of exactly this breaking servers.local.yml). Write any note
+# over one line, or containing a colon at all, as a block scalar
+# instead: `- >-` on its own line, then the text indented underneath.
+# Validate after editing: `python3 -c "import yaml;
+# yaml.safe_load(open('servers.local.yml'))"`.
 
 server-a.example:
   os: Debian 12

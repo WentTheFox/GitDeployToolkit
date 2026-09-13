@@ -345,3 +345,14 @@ one host) surfaced two real bugs, neither obvious in advance:
   detail whatsoever, or better, don't mention it. The real name is fine
   in `servers.local.yml` itself (gitignored) and in conversation with
   the user.
+- `servers.local.yml`'s freeform notes will eventually contain a colon
+  (a URL, a ratio, a label) — as a bare `- text` list item, `: ` is a
+  mapping-key indicator, not prose, and silently produces invalid YAML
+  (this actually happened — several notes broke the file this way and
+  went unnoticed until asked to validate). Write any note that spans
+  multiple lines, or contains a colon at all, as a block scalar instead
+  (`- >-` on its own line, text indented underneath). After editing this
+  file, validate it: `python3 -c "import yaml;
+  yaml.safe_load(open('servers.local.yml'))"` (needs `pyyaml` — a
+  throwaway venv is fine, don't install it into any project
+  environment).

@@ -197,22 +197,24 @@ changes, it's the source of truth for the intended UX.
 - Test hook changes the way the existing commit did: a throwaway bare
   repo + worktree under `/tmp`, real `git push`, inspect the resulting
   worktree — rather than trusting `bash -n` alone or guessing.
-- Real hostnames/IPs/paths for the user's actual servers never go in
-  tracked files. `servers.local.yml` (gitignored; see
-  `servers.example.yml`)
-  is where that inventory lives — when discussing "which server", check
-  that file if it exists rather than asking the user to repeat it, but
-  don't put its contents into anything committed.
-- An app entry in `servers.local.yml` can be marked `sensitive: true`.
-  When it is, treat its **name AND which server it's on** as both
-  sensitive — neither may appear in any tracked or committed file,
-  anywhere: not just this toolkit's own CLAUDE.md/README, but commit
-  messages, PR descriptions, code comments, anything that ends up in
-  source control (this repo's or the app's own). Don't launder this
-  into an oblique-but-still-identifying reference either (e.g. "a
-  sensitive app on the second VPS" still narrows it to one of a handful
-  of apps on a specific host) — if a tracked file needs to mention that
-  work touched a sensitive app at all, say so with no identifying
-  detail whatsoever, or better, don't mention it. The real name and
-  host are fine in `servers.local.yml` itself (gitignored) and in
-  conversation with the user.
+- Real hostnames/IPs/paths for the user's actual servers are **always**
+  sensitive — never go in tracked files, unconditionally, whether or not
+  any app on that server is flagged `sensitive`. `servers.local.yml`
+  (gitignored; see `servers.example.yml`) is where that inventory lives
+  — when discussing "which server", check that file if it exists rather
+  than asking the user to repeat it, but don't put its contents into
+  anything committed.
+- An app entry in `servers.local.yml` can additionally be marked
+  `sensitive: true`. This is about the **app itself**, on top of the
+  always-sensitive server names above: its name must never appear in
+  any tracked or committed file, anywhere — not just this toolkit's own
+  CLAUDE.md/README, but commit messages, PR descriptions, code
+  comments, anything that ends up in source control (this repo's or the
+  app's own). Don't launder this into an oblique-but-still-identifying
+  reference either — naming which server it's on (itself already
+  forbidden) or any other detail that narrows it to one of a handful of
+  candidates still identifies it. If a tracked file needs to mention
+  that work touched a sensitive app at all, say so with no identifying
+  detail whatsoever, or better, don't mention it. The real name is fine
+  in `servers.local.yml` itself (gitignored) and in conversation with
+  the user.

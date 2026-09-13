@@ -2,18 +2,21 @@
 #
 # Nothing in this toolkit's scripts reads this file — it's just a place to
 # jot down which real host is which, since that's not derivable from the
-# code itself. Keep your actual hostnames/paths here instead of in any
-# tracked file. Hosts are resolved by name only (/etc/hosts), so no IPs
-# needed here.
+# code itself. Real hostnames/IPs/paths are ALWAYS sensitive — keep them
+# here instead of in any tracked file, unconditionally, regardless of
+# whether any app below is flagged sensitive. Hosts are resolved by name
+# only (/etc/hosts), so no IPs needed here.
 #
-# `sensitive: true` on an app entry means BOTH its name AND which server
-# it's on are sensitive — neither may appear in any tracked/committed
-# file anywhere: this toolkit's own CLAUDE.md/README, commit messages,
-# PR descriptions, code comments, everything. Don't launder this into an
-# oblique-but-still-identifying reference either (e.g. naming the host
-# without the app still narrows it down) — say nothing identifying at
-# all, or don't mention it. servers.local.yml itself is gitignored, so
-# the real name and host are still fine to write right here.
+# `sensitive: true` on an app entry is about that app specifically, on
+# top of the always-sensitive host names above: its NAME must never
+# appear in any tracked/committed file anywhere — this toolkit's own
+# CLAUDE.md/README, commit messages, PR descriptions, code comments,
+# everything. Don't launder this into an oblique-but-still-identifying
+# reference either — naming the host it's on (itself already forbidden)
+# or any other detail that narrows it to one of a handful of candidates
+# still identifies it. Say nothing identifying at all, or don't mention
+# it. servers.local.yml itself is gitignored, so the real name is still
+# fine to write right here.
 
 server-a.example:
   os: Debian 12

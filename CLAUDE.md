@@ -83,6 +83,13 @@ changes, it's the source of truth for the intended UX.
   `servers.local.yml` (gitignored) for exactly which host, its
   worktree/bare-repo paths, deploy user, and local clone paths for every
   app on it — not repeated here since this file is tracked.
+- **Two more apps on that first VPS are now migrated:** `Celestia` (a
+  pnpm/turbo monorepo, Next.js served via a single fork-mode pm2
+  process, `pm2 reload` on deploy) and `Luna` (a php-fpm-served Laravel
+  API with no queue worker or SSR process). Both verified with a real
+  `git push deploy main`. See `servers.local.yml` for exact paths and
+  the pitfalls this migration surfaced (Luna's `storage/logs/
+  laravel.log` permission gap and a new artisan down/up bracket).
 - A handful of other apps on that same VPS are intentionally **not**
   being migrated (abandoned or otherwise a no-op, per the user) — see
   `servers.local.yml` for which ones; don't propose migrating them
@@ -258,9 +265,10 @@ deploy mechanism if one existed:
 5. Note in `servers.local.yml` that this cleanup is done (or still
    pending) for that app, so it isn't silently re-discovered later.
 
-As of this note: `when`, `fantastick`, and `pennycurve` have all been
-fully cleaned up this way — see `servers.local.yml` for exactly what
-was removed on each. Run this checklist on every future migration.
+As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`, and
+`Luna` have all been fully cleaned up this way — see `servers.local.yml`
+for exactly what was removed on each. Run this checklist on every
+future migration.
 
 ## Pitfalls hit giving a second worktree of the same app its own deploy target
 
@@ -312,6 +320,39 @@ one host) surfaced two real bugs, neither obvious in advance:
   values, and each was confirmed as a true no-op on production (same
   process name, same restart behavior, zero content diff) before beta
   was touched.
+
+## Pitfalls hit migrating an app with no prior maintenance-mode bracket at all
+
+`Luna`'s old hand-rolled `post-receive.sh` never wrapped its deploy in
+anything like `artisan down`/`up` — it just ran composer/artisan
+commands directly against the live, still-serving site. This had
+apparently been fine for years, but the very first real deploy through
+the toolkit produced a handful of transient live 500s: a request landed
+mid-`artisan optimize`/`migrate` and saw a half-regenerated
+`bootstrap/cache`. Not a toolkit bug, just a pre-existing race that
+happened to get hit. Fix: add the same `artisan down --retry=N` /
+`artisan up` bracket already used by `when`/SledgeHammerTime, with `up`
+always running even if a build step failed (same `FAILED` idiom as the
+build-failure-handling pitfall above) — don't assume an app without a
+bracket in its old script doesn't need one; check whether the old
+script predates the app's queue-worker/heavier-build era.
+
+Separately, the **storage/bootstrap-cache permission fix from the
+SledgeHammerTime pitfall is a directory-level check and can still miss
+individual files.** Luna's `storage/` and `bootstrap/cache/`
+directories themselves were already `www-data`-group and
+group-writable (the initial per-app pitfall check passed), but one
+specific pre-existing file inside — `storage/logs/laravel.log`, dating
+back to 2021 — was still owned by the deploy user and not writable by
+`www-data`, because `chgrp -R`/`chmod -R` had never actually been run
+against it before (it predates any of this tooling). A live request hit
+a real exception (an unrelated Redis-extension-resolution issue,
+itself pre-existing) and couldn't log it, looking identical to the
+SledgeHammerTime case from the outside. Check individual long-lived log
+files with `sudo -u <web-user> test -w <file>` specifically, not just
+the containing directory's group/mode — and don't assume a Laravel
+app is safe just because `storage/`/`bootstrap/cache/` pass the
+directory-level check.
 
 ## Working conventions for this repo
 

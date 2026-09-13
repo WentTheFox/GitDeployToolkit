@@ -36,6 +36,7 @@ server-a.example:
   apps:
     - name: myapp
       manager: pm2
+      live_url: https://myapp.example   # optional, for a quick health-check curl target
     - name: another-app
       manager: systemd
       sensitive: true   # never name this app in any tracked file

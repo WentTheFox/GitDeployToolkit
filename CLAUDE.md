@@ -73,13 +73,14 @@ changes, it's the source of truth for the intended UX.
 - Toolkit is written and passed a local end-to-end smoke test (simulated
   bare repo + push in `/tmp`, verified checkout + `deploy_build` +
   `deploy_restart` all ran). See git log for that commit.
-- **One of the two VPSes is migrated and has one real app on the
+- **One of the two VPSes is migrated and has two real apps on the
   toolkit:** `fantastick` (a pm2 app, two processes: App +
-  QueueWorker). Verified with a real `git push deploy main` that ran
-  `deploy_build`/`deploy_restart` and restarted the live pm2 processes
-  successfully. See `servers.local.yml` (gitignored) for exactly which
-  host, its worktree/bare-repo paths, and deploy user — not repeated
-  here since this file is tracked.
+  QueueWorker) and `pennycurve` (a single pm2 process). Both verified
+  with a real `git push deploy main` that ran `deploy_build`/
+  `deploy_restart` and restarted the live pm2 processes successfully.
+  See `servers.local.yml` (gitignored) for exactly which host, its
+  worktree/bare-repo paths, deploy user, and local clone paths for every
+  app on it — not repeated here since this file is tracked.
 - The toolkit itself is installed on that VPS as a real git clone (not a
   tarball copy), tracking this repo's GitHub remote via a dedicated
   **read-only deploy key** generated on that server (not the user's
@@ -133,6 +134,26 @@ changes, it's the source of truth for the intended UX.
   on this machine is `went.github.com`. Not a toolkit issue, just a
   local-environment gotcha worth remembering before assuming a push
   failure means something's wrong server-side.
+- **A server checkout with unrelated git history isn't necessarily
+  broken — check for a prior intentional rewrite first.** Migrating
+  `pennycurve` hit the same "no merge-base with origin" situation as a
+  red flag, but this time it was a *known* intentional history
+  rewrite from an earlier session (a squashed-history restoration,
+  force-pushed to GitHub) that the server's checkout had just never
+  picked up. Before assuming corruption or reconciling by hand: check
+  whether tracked-file content actually differs
+  (`git diff --stat HEAD origin/<branch>` — empty output means it's
+  history-only), and check other Claude sessions on the machine for
+  context (`grep -rl <keyword> ~/.claude/projects/`) before asking the
+  user to explain from scratch. If content matches, a plain
+  `git fetch && git reset --hard origin/<branch>` is safe.
+- **A broken CI workflow surfacing after a toolkit-only commit is
+  probably pre-existing, not caused by that commit.** `pennycurve`'s
+  first push after adding `deploy.conf` showed a failed CI run — but
+  `gh run list` showed every run back to March had failed the same way,
+  in ~5-8s, before any real build step (GitHub had blocked
+  `actions/cache@v2`/`checkout@v2`/`setup-node@v2` as deprecated). Check
+  run history before assuming a deploy-toolkit change broke something.
 
 ## Working conventions for this repo
 

@@ -262,6 +262,57 @@ As of this note: `when`, `fantastick`, and `pennycurve` have all been
 fully cleaned up this way — see `servers.local.yml` for exactly what
 was removed on each. Run this checklist on every future migration.
 
+## Pitfalls hit giving a second worktree of the same app its own deploy target
+
+`sledgehammertime`'s beta/staging copy (same repo, same `deploy.conf`,
+separate worktree on the same server) needed its own pm2 SSR process and
+its own Horizon queue worker so it wouldn't collide with production's —
+this class of setup (one app, two independently-pushable environments on
+one host) surfaced two real bugs, neither obvious in advance:
+
+- **`pm2 start ecosystem.json --name X` does not rename the process.**
+  PM2 silently ignores `--name` when the target file has its own `apps`
+  array with a `name` already baked in — it just matches (and
+  restarts!) whatever process already has that baked-in name, or starts
+  a new one under the FILE's name, not your override. Confirmed the
+  hard way: beta's first deploy under a distinct `PM2_SSR_NAME`
+  silently restarted **production's** already-running process instead
+  of starting its own. Fix: for the first-start path only, build the
+  `pm2 start` invocation from plain CLI flags mirroring the ecosystem
+  file's fields (`--interpreter`, `--cron-restart`, `--wait-ready`,
+  `--time`, the script + args) instead of passing the file. Restarting
+  an already-uniquely-named existing process by name is unaffected and
+  was never the problem.
+- **A framework's own "SSR URL" config often only controls the
+  client-side call-out, not what port the SSR server itself binds.**
+  Laravel Inertia's `INERTIA_SSR_URL` config (and likely equivalents in
+  other frameworks with a similar split HTTP-render-server pattern) is
+  read by the PHP side to know where to send render requests — it is
+  **not** passed down to the actual Node process that binds a port.
+  `@inertiajs/vue3/server`'s `createServer()` defaults to a fixed port
+  (13714) unless the app's own SSR entry file explicitly forwards a
+  `port` option, typically from a *build-time* env var (Vite inlines
+  `import.meta.env.VITE_*` at build time, so this must be set in each
+  worktree's own `.env` **before** that worktree's build runs — an
+  after-the-fact `.env` edit does nothing until the next `artisan
+  optimize`/build re-reads it). Getting this wrong looks exactly like
+  the pm2 naming bug from the outside (both processes fighting, endless
+  restarts) but needs a real source change, not just deploy.conf/env
+  config — check both the framework's docs AND its actual server
+  package source (`grep` for the default port literal) before assuming
+  a config var alone controls it. Both apps briefly crash-looped
+  (`EADDRINUSE`) fighting over the same port before this was traced;
+  `pm2 describe <name>` showing `unstable restarts` climbing with a
+  fresh pid each check is the signal to look for.
+- **When two worktrees share one `deploy.conf`, default every
+  override to production's exact existing behavior, and verify that
+  by actually deploying to production first**, before touching the
+  second worktree at all — every naming/port change here was designed
+  so an unset override falls back to production's pre-existing literal
+  values, and each was confirmed as a true no-op on production (same
+  process name, same restart behavior, zero content diff) before beta
+  was touched.
+
 ## Working conventions for this repo
 
 - Git identity is set locally in this repo (`user.email`/`user.name`),

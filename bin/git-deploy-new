@@ -39,6 +39,19 @@ EOF
 ln -sf "$TOOLKIT_LIB/post-receive" "$BARE_REPO/hooks/post-receive"
 chmod +x "$TOOLKIT_LIB/post-receive"
 
+# This is typically run via sudo (it writes under /srv and /usr/local),
+# which would otherwise leave the bare repo root-owned. Deploys then run
+# as whoever pushes to it — if that's root, `git checkout -f` writes
+# root-owned files into what should be the app's own worktree, and any
+# `pm2 restart` in deploy_restart targets root's pm2 daemon instead of
+# the one actually running the app, so the restart silently no-ops.
+# Chown to $SUDO_USER (the person who ran sudo) so pushes/deploys happen
+# as the actual app owner instead.
+if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  chown -R "$SUDO_USER:$SUDO_USER" "$BARE_REPO" "$WORKTREE"
+  echo "git-deploy-new: chowned $BARE_REPO and $WORKTREE to $SUDO_USER"
+fi
+
 echo "git-deploy-new: created $BARE_REPO"
 echo "git-deploy-new: worktree -> $WORKTREE (branch: $BRANCH)"
 echo

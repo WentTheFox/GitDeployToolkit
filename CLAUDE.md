@@ -73,11 +73,66 @@ changes, it's the source of truth for the intended UX.
 - Toolkit is written and passed a local end-to-end smoke test (simulated
   bare repo + push in `/tmp`, verified checkout + `deploy_build` +
   `deploy_restart` all ran). See git log for that commit.
-- **Nothing is installed on the real VPSes yet.** No app has been
-  migrated to this. That's the natural next step whenever the user wants
-  to proceed: `sudo ./install.sh` on a VPS, then `git-deploy-new` per app,
-  then add `deploy.conf` to that app's repo and switch its git remote.
-- Raspberry Pi / Raspbian target: not attempted.
+- **One of the two VPSes is migrated and has one real app on the
+  toolkit:** `fantastick` (a pm2 app, two processes: App +
+  QueueWorker). Verified with a real `git push deploy main` that ran
+  `deploy_build`/`deploy_restart` and restarted the live pm2 processes
+  successfully. See `servers.local.yml` (gitignored) for exactly which
+  host, its worktree/bare-repo paths, and deploy user — not repeated
+  here since this file is tracked.
+- The toolkit itself is installed on that VPS as a real git clone (not a
+  tarball copy), tracking this repo's GitHub remote via a dedicated
+  **read-only deploy key** generated on that server (not the user's
+  personal/org SSH key) — see the pitfalls section below before
+  repeating this on another server. Exact clone path is in
+  `servers.local.yml`.
+- The second VPS: not migrated yet. The Raspberry Pi target: not
+  attempted — per `servers.local.yml`, no app there obviously matches
+  the `/var/www` or `/var/node` convention, needs investigation before
+  migrating anything.
+- Next steps whenever the user wants to proceed: same recipe as
+  fantastick, applied one app at a time to the still-unmigrated VPS.
+
+## Pitfalls hit during the first real migration (fantastick)
+
+- **Bare repo ownership.** `git-deploy-new` needs root (it writes under
+  `/srv/git` and `/usr/local`), so it's natural to run it via `sudo` —
+  but that used to leave the bare repo root-owned. If deploys then run
+  as root, `git checkout -f` writes root-owned files into an app
+  worktree that's normally owned by the app's actual deploy user, AND
+  `pm2 restart <name>` run as root targets *root's own pm2 daemon*, not
+  the one actually running the app — so the restart silently does
+  nothing to the real process. **Fixed in `git-deploy-new`**: it now
+  chowns the bare repo and worktree to `$SUDO_USER` when run via sudo.
+  Still push as that user
+  (`ssh://<deploy-user>@host/srv/git/<app>.git`), not root.
+- **Migrating an app that's already deployed some other way.** The bare
+  repo starts empty; the first push needs to seed it from whatever
+  commit is already live, e.g. from inside the existing checkout:
+  `git push /srv/git/<app>.git HEAD:main`. This is safe as a genuine
+  no-op *only* if the worktree is already at that exact commit and
+  `deploy.conf` isn't present in it yet (so the hook does the checkout
+  but skips build/restart) — don't assume that in general, check both
+  conditions before treating a seed push as harmless.
+- **Auto-mode production-safety classifier.** Running `install.sh`
+  and pushing to a real app's `deploy` remote both got flagged as
+  "production deploy" and blocked pending user confirmation — expect
+  this every time on a real server, it's not a bug, just plan for the
+  confirmation round-trip.
+- **Stale GitHub host key.** `root`'s `~/.ssh/known_hosts` on the server
+  still had GitHub's pre-2023-rotation RSA key, which made the *new*
+  (legitimate) key look like a MITM warning. Verified the offered
+  fingerprint against GitHub's published one before trusting it — if
+  this comes up again, check
+  https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+  rather than assuming either "definitely fine" or "definitely a MITM".
+- **Wrong SSH identity for a push.** This machine has multiple GitHub SSH
+  identities behind different host aliases in `~/.ssh/config` (personal
+  vs. org accounts). A plain `git@github.com:...` remote picked the
+  wrong one and got denied; the working alias for WentTheFox-owned repos
+  on this machine is `went.github.com`. Not a toolkit issue, just a
+  local-environment gotcha worth remembering before assuming a push
+  failure means something's wrong server-side.
 
 ## Working conventions for this repo
 

@@ -93,12 +93,18 @@ changes, it's the source of truth for the intended UX.
   personal/org SSH key) — see the pitfalls section below before
   repeating this on another server. Exact clone path is in
   `servers.local.yml`.
-- The second VPS: not migrated yet. The Raspberry Pi target: not
-  attempted — per `servers.local.yml`, no app there obviously matches
-  the `/var/www` or `/var/node` convention, needs investigation before
-  migrating anything.
+- **The second VPS is now migrated too, with one app on it so far:** a
+  Laravel app with a Horizon queue worker and a pm2-managed SSR process
+  (same install-a-dedicated-deploy-key-and-clone approach as the first
+  VPS). Verified with a real `git push deploy main`. A sibling app on
+  that same VPS sharing the same codebase but deployed to a separate
+  worktree is **not** migrated — left untouched. See `servers.local.yml`
+  for exactly which apps and paths.
+- The Raspberry Pi target: not attempted — per `servers.local.yml`, no
+  app there obviously matches the `/var/www` or `/var/node` convention,
+  needs investigation before migrating anything.
 - Next steps whenever the user wants to proceed: same recipe as the apps
-  above, applied one app at a time to the still-unmigrated VPS.
+  above, applied to whatever's next.
 
 ## Pitfalls hit during the first real migration (fantastick)
 
@@ -185,6 +191,37 @@ changes, it's the source of truth for the intended UX.
   and defer the actual `return 1` to the very end of `deploy_restart`,
   using a plain (non-`local`) variable so it survives from `deploy_build`
   into `deploy_restart` — they run in the same sourced shell.
+- **`deploy_build`/`deploy_restart` run as the deploy user (e.g. the git
+  user pushing over SSH), not the web server user — files they create
+  or regenerate (Laravel's `storage/`, `bootstrap/cache/`, framework
+  caches, log files) can end up owned/moded so the web server user
+  can't write to them, and a web-server-triggered exception then fails
+  to even log itself: Laravel's generic "Server Error" response comes
+  back with **nothing in `storage/logs/laravel.log`**, because writing
+  that log entry is exactly what failed. This looks like a mysterious
+  unrelated bug (a real API endpoint 500ing for no visible reason) when
+  it's actually just a permissions gap. Caught on `sledgehammertime`
+  right after migrating it — a CI job hit a real 500 on a live route —
+  but the root cause **predated the migration**: `storage/logs/
+  laravel.log` was owned `<deploy-user>:<deploy-user>` mode `644` since
+  months before the toolkit ever touched this app (verified via the
+  file's birth time), the web server user wasn't even in that group,
+  and the old hand-rolled post-receive script ran as the same deploy
+  user and would have hit the identical gap. The toolkit didn't cause
+  it — it's a latent bug in *any* deploy mechanism where a different
+  user than the web server regenerates these directories, that this
+  migration's redeploy happened to surface. Diagnose with
+  `sudo -u <web-user> test -w <file>` directly (don't trust `ls -la`
+  group names alone — verify actual write access). Fix: `chgrp -R
+  <web-user-group> storage bootstrap/cache`, `chmod -R ug+rw` on both,
+  and `chmod g+s` on their directories so new files inherit the right
+  group going forward; consider adding this as a `deploy_build` step
+  (after `artisan optimize`) for any Laravel app on this toolkit, not
+  just a one-time manual fix, so a deleted/regenerated log file doesn't
+  silently regress it. When a live app starts 500ing on a route right
+  after a migration with no obvious code cause, check this class of
+  issue before assuming it's an application bug — and check whether it
+  predates the migration (as this one did) before blaming the toolkit.
 - **Every app migrated so far had the same leftover old-deploy pattern**
   — not just `when` (see above): a stale `production` git remote in the
   local clone pointing straight at the worktree, `receive.

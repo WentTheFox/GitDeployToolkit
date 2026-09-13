@@ -5,6 +5,14 @@
 # code itself. Keep your actual hostnames/paths here instead of in any
 # tracked file. Hosts are resolved by name only (/etc/hosts), so no IPs
 # needed here.
+#
+# `sensitive: true` on an app entry means its NAME (not just paths/hosts,
+# which already never go in tracked files) must never appear in any
+# tracked/committed file anywhere — this toolkit's own CLAUDE.md/README,
+# commit messages, PR descriptions, code comments, everything. Refer to
+# it obliquely instead ("a sensitive app on the second VPS") in anything
+# that ends up in source control. servers.local.yml itself is gitignored,
+# so the real name is still fine to write right here.
 
 server-a.example:
   os: Debian 12
@@ -15,6 +23,7 @@ server-a.example:
       manager: pm2
     - name: another-app
       manager: systemd
+      sensitive: true   # never name this app in any tracked file
   notes: []
 
 pi.example:

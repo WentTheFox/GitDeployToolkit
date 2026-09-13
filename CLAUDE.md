@@ -203,3 +203,11 @@ changes, it's the source of truth for the intended UX.
   is where that inventory lives — when discussing "which server", check
   that file if it exists rather than asking the user to repeat it, but
   don't put its contents into anything committed.
+- An app entry in `servers.local.yml` can be marked `sensitive: true`.
+  When it is, that app's **name** must never appear in any tracked or
+  committed file, anywhere — not just this toolkit's own CLAUDE.md/
+  README, but commit messages, PR descriptions, code comments, anything
+  that ends up in source control (this repo's or the app's own). Refer
+  to it obliquely instead ("a sensitive app on the second VPS") in
+  anything tracked; the real name is fine in `servers.local.yml` itself
+  (gitignored) and in conversation with the user.

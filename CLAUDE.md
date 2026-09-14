@@ -90,6 +90,13 @@ changes, it's the source of truth for the intended UX.
   `git push deploy main`. See `servers.local.yml` for exact paths and
   the pitfalls this migration surfaced (Luna's `storage/logs/
   laravel.log` permission gap and a new artisan down/up bracket).
+- **`when`'s deploy.conf got a follow-up fix weeks after its own
+  migration was verified clean**: a peer session found a queue-worker
+  log-permission gap (same bug class as SledgeHammerTime/Luna, just on
+  a file the original migration check never exercised) that had been
+  silently failing a background job for ~2 weeks. Fixed live and made
+  durable in `deploy.conf`. See the dedicated pitfalls section below —
+  this bug class isn't a one-time migration check.
 - A handful of other apps on that same VPS are intentionally **not**
   being migrated (abandoned or otherwise a no-op, per the user) — see
   `servers.local.yml` for which ones; don't propose migrating them
@@ -353,6 +360,36 @@ files with `sudo -u <web-user> test -w <file>` specifically, not just
 the containing directory's group/mode — and don't assume a Laravel
 app is safe just because `storage/`/`bootstrap/cache/` pass the
 directory-level check.
+
+## This permission-gap bug class can resurface even after an app's own migration was verified clean
+
+`when` was migrated first (see above) and its first real deploy through
+the toolkit checked out clean — but weeks later, a peer Claude session
+working in `when`'s own repo (name `when-81`) found `when-horizon.service`
+(runs as `www-data`) silently failing every
+`App\Jobs\RecomputeShareLinkAvailability` job for about two weeks:
+`storage/logs/availability.log` was owned by the deploy user and
+unwritable by `www-data`, so the job's own `Log::channel(...)->info()`
+call threw and killed it before it could do anything else. Root cause:
+`when`'s old `post-receive.sh` (faithfully ported into its `deploy.conf`,
+see the entry above) also ran entirely as the deploy user and never
+touched this particular log channel's file, so the original migration's spot-check
+never exercised it — the gap was real from day one, just not on a file
+anyone happened to check. Fixed live (`chgrp -R www-data` +
+`chmod -R ug+rw` + `chmod g+s` on `storage`/`bootstrap/cache`, same as
+SledgeHammerTime/Luna), retried all 21 queued failed jobs (all
+succeeded), and added the same reassertion as a permanent `deploy_build`
+step in `when`'s `deploy.conf` so it can't regress again — verified
+writable after a real subsequent deploy, not just the manual fix.
+Lesson: this bug class isn't a one-time migration check, it's a standing
+risk for **every** app on this toolkit where the deploy user differs
+from the web/queue user, especially for log channels/files that are only
+written on a specific, infrequent code path (a failing background job
+here vs. a routed HTTP exception on SledgeHammerTime/Luna) — a clean
+first deploy doesn't rule it out for files that deploy never happened to
+touch. Consider auditing every already-migrated Laravel app's `storage/`
+tree for individually-owned files rather than waiting for another job to
+fail first.
 
 ## Working conventions for this repo
 

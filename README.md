@@ -85,21 +85,39 @@ hosted runners. It works by installing a GitHub Actions **self-hosted**
 runner directly on the server, so the credential/access needed to push
 to `deploy` never has to leave it.
 
-**Once per server** (not once per app — every app shares this the same
-way they share the post-receive hook):
+Unlike the post-receive hook, a runner registration can't actually be
+shared across repos unless those repos belong to a GitHub
+**Organization** (org-level runner groups are what makes that possible).
+Under a personal account, each repo gets **its own** runner registration
+— there's no personal-account-wide equivalent. That still doesn't mean
+copy-pasting a bespoke setup per app: run one lightweight runner
+*instance* per app, all on the same physical server if that's where they
+all deploy, all labeled `git-deploy` so every app's `deploy.yml` looks
+identical and this template never has to change per app — the sharing is
+at the label/template/convention level, not the registration itself.
+(If these apps ever move under an Organization, an org-level runner
+group would let one actual runner process serve all of them — a bigger
+change, not required for any of this to work today.)
 
-1. Install a self-hosted runner following GitHub's own instructions
-   (repo or organization Settings → Actions → Runners → New self-hosted
-   runner gives you a registration token and the exact `config.sh`
-   command). Register it under a runner group visible to whichever repos
-   will use it, and give it the label `git-deploy`.
-2. Install it as a service (`./svc.sh install && ./svc.sh start`) so it
-   survives reboots.
-3. Make sure the OS user running the runner can push to this server's
-   bare repos the same way your own deploy user can — simplest is
-   running the runner as that same deploy user.
+**Once per app**, on the server:
 
-**Once per app**, in the app's own repo:
+1. Install a self-hosted runner following GitHub's own instructions for
+   that specific repo (that repo's Settings → Actions → Runners → New
+   self-hosted runner gives you a registration token and the exact
+   `config.sh` command — the token is single-use and tied to that repo,
+   so this step repeats per app). Give it the label `git-deploy`, and a
+   `--name` that identifies which app it's for (the label is what the
+   workflow targets; the name is just so `runner status` output is
+   readable with several installed).
+2. Install it as its own service (`./svc.sh install && ./svc.sh start`,
+   run from that runner's own directory) so it survives reboots — each
+   app's runner is a separate directory/service, even side by side on
+   one server.
+3. Make sure the OS user running it can push to this app's bare repo the
+   same way your own deploy user can — simplest is running it as that
+   same deploy user.
+
+**Also once per app**, in the app's own repo:
 
 1. Copy `template/deploy.yml.example` to `.github/workflows/deploy.yml`
    and commit it.
@@ -124,10 +142,15 @@ that disappears after the job. A few things matter more than the rest:
   requires repo *write* access — a fork/PR alone can't fire it. Keep it
   that way: never add another trigger to a workflow that targets the
   `git-deploy` label, on any app.
-- **Register the runner scoped to the repos that actually need it**, not
-  "all repositories" in an org-wide runner group — an org-wide group
-  quietly hands every current and future repo in the org the same
-  server access, not just the apps you meant to wire up.
+- **Per-repo runner registration (the personal-account default above)
+  already gives you this for free** — each runner only ever runs jobs
+  for the one repo it was registered to, nothing wider to accidentally
+  loosen. The thing to watch is the mirror image: if these repos ever
+  move under a GitHub Organization and you switch to one shared
+  org-level runner (see above), don't register it into a runner group
+  scoped to "all repositories" — scope the group explicitly to the apps
+  that need it, or an unrelated future repo in the org inherits the same
+  server access with zero extra steps on your part.
 - **Add an approval gate on top of the confirm input.** The template
   references a `production` GitHub Environment — create one (Settings →
   Environments) and add required reviewers there to require a second

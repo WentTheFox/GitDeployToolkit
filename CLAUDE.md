@@ -44,12 +44,23 @@ to the server and a credential leaving it), or push-to-main auto-deploy
 (deploying briefly takes the app down, so it should always be a
 deliberate in-the-moment click, never automatic off a merge — matches
 `when`'s own CLAUDE.md rule about never pushing to `deploy` without
-explicit go-ahead). One runner, labeled `git-deploy`, per **server** —
-not per app — registered once and shared by every app's workflow on that
-box, mirroring the toolkit's own "one hook shared by every app" design.
-See README.md's "Triggering deploys from GitHub Actions" for the actual
-setup steps (this is server-side runner registration, so — like
-`install.sh` — it can't be done from within this repo, only documented).
+explicit go-ahead). Every app's workflow targets the same `git-deploy`
+runner **label**, mirroring the toolkit's own "one hook shared by every
+app" design — but the underlying registration is NOT actually shared:
+these repos are under a personal GitHub account, not an Organization,
+and GitHub only lets a runner *registration* be shared across repos via
+an org's runner groups. So in practice this means one runner **instance**
+per app (same label, separate registration/service, can coexist on one
+physical server) — don't assume registering a runner for one app also
+covers another. If these repos ever move under an Organization, one
+real shared runner via an org-level runner group becomes possible; not
+needed for any of this to work today. See README.md's "Triggering
+deploys from GitHub Actions" for the actual setup steps (this is
+server-side runner registration, so — like `install.sh` — it can't be
+done from within this repo, only documented) and its "Locking this down"
+subsection for the security considerations (this repo being public is
+the one that matters most: never let anything but `workflow_dispatch`
+target the `git-deploy` label).
 
 ## Architecture
 

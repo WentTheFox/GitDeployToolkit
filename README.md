@@ -109,12 +109,42 @@ way they share the post-receive hook):
 
 Then: Actions tab → "Deploy" → Run workflow → type `deploy` to confirm.
 
+### Locking this down
+
 A self-hosted runner executes whatever workflow code the repos pointed
-at it contain, so only register it for (or grant a runner group to)
-repos you trust — don't add a public repo's fork-triggered `pull_request`
-workflows to this runner group. `workflow_dispatch` itself already
-requires repo write access to trigger, so this template is safe by
-construction as long as the runner group stays scoped to trusted repos.
+at it contain — it's real access to the server, not a sandboxed cloud VM
+that disappears after the job. A few things matter more than the rest:
+
+- **If any app using this is a public repo, this is the one that
+  matters most.** GitHub's own guidance is blunt: don't point a
+  self-hosted runner at a workflow that can be triggered by a stranger,
+  e.g. `pull_request`/`pull_request_target` from a fork, or `push` to a
+  branch anyone can open a PR against. `workflow_dispatch` (what
+  `deploy.yml.example` uses) is safe specifically because triggering it
+  requires repo *write* access — a fork/PR alone can't fire it. Keep it
+  that way: never add another trigger to a workflow that targets the
+  `git-deploy` label, on any app.
+- **Register the runner scoped to the repos that actually need it**, not
+  "all repositories" in an org-wide runner group — an org-wide group
+  quietly hands every current and future repo in the org the same
+  server access, not just the apps you meant to wire up.
+- **Add an approval gate on top of the confirm input.** The template
+  references a `production` GitHub Environment — create one (Settings →
+  Environments) and add required reviewers there to require a second
+  person's (or your own second-factor/second-session) approval before
+  the job actually runs. Free on public repos, no-op until configured.
+- **Know what OS user the runner runs as.** If it's the same user that
+  already pushes to every app's `deploy` remote on that server (see the
+  pitfalls in CLAUDE.md — one deploy user across many apps is this
+  toolkit's existing pattern), a compromised runner can reach every app
+  on the box, not just the one that triggered it. That's a pre-existing
+  tradeoff of this toolkit's simplicity, not something the GitHub
+  Actions trigger introduces — just don't assume the runner is sandboxed
+  to one app if it isn't.
+- Leave the runner's own auto-update on, and keep its scoped sudo rule
+  (see "sudo for restarts" below) exactly as narrow as any other deploy
+  path already requires — the GitHub Actions trigger doesn't need any
+  privilege beyond what `git push deploy main` already needed by hand.
 
 ## sudo for restarts
 

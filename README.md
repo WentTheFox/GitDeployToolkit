@@ -75,6 +75,47 @@ signals the running process to reload itself. `deploy_build`/
 `deploy_restart` can see `$oldrev`/`$newrev`/`$GIT_DIR` to make that
 call.
 
+## Triggering deploys from GitHub Actions (optional)
+
+Deploy is always just `git push deploy main` — this only changes *who*
+runs that push, from your own machine to a button in GitHub's Actions
+tab, without adopting a third-party CI/deploy subscription (Forge,
+Envoyer, etc.) or opening the server to inbound access from GitHub's
+hosted runners. It works by installing a GitHub Actions **self-hosted**
+runner directly on the server, so the credential/access needed to push
+to `deploy` never has to leave it.
+
+**Once per server** (not once per app — every app shares this the same
+way they share the post-receive hook):
+
+1. Install a self-hosted runner following GitHub's own instructions
+   (repo or organization Settings → Actions → Runners → New self-hosted
+   runner gives you a registration token and the exact `config.sh`
+   command). Register it under a runner group visible to whichever repos
+   will use it, and give it the label `git-deploy`.
+2. Install it as a service (`./svc.sh install && ./svc.sh start`) so it
+   survives reboots.
+3. Make sure the OS user running the runner can push to this server's
+   bare repos the same way your own deploy user can — simplest is
+   running the runner as that same deploy user.
+
+**Once per app**, in the app's own repo:
+
+1. Copy `template/deploy.yml.example` to `.github/workflows/deploy.yml`
+   and commit it.
+2. Add a repo secret named `DEPLOY_REMOTE_URL` set to the exact value of
+   `git remote add deploy ...` from the "Client side" section above (or
+   `git remote get-url deploy` if you already added it locally).
+
+Then: Actions tab → "Deploy" → Run workflow → type `deploy` to confirm.
+
+A self-hosted runner executes whatever workflow code the repos pointed
+at it contain, so only register it for (or grant a runner group to)
+repos you trust — don't add a public repo's fork-triggered `pull_request`
+workflows to this runner group. `workflow_dispatch` itself already
+requires repo write access to trigger, so this template is safe by
+construction as long as the runner group stays scoped to trusted repos.
+
 ## sudo for restarts
 
 `deploy_restart` often needs to restart a systemd unit as root. Scope

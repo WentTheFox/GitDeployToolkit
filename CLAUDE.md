@@ -31,6 +31,26 @@ without a reason:
   changes, it's a real architecture change, not a tweak, and should be
   confirmed with the user first.
 
+## Optional: GitHub Actions deploy trigger
+
+`template/deploy.yml.example` (copied per-app into that app's own
+`.github/workflows/deploy.yml`, same relationship `deploy.conf.example`
+has to `deploy.conf` — a workflow file can't live centrally, GitHub only
+looks inside the repo it belongs to) gives a `workflow_dispatch`-only
+"Deploy" button that just runs `git push deploy main` from a
+**self-hosted** runner living on the server itself. Deliberately not:
+GitHub-hosted runners + an SSH secret (would need inbound network access
+to the server and a credential leaving it), or push-to-main auto-deploy
+(deploying briefly takes the app down, so it should always be a
+deliberate in-the-moment click, never automatic off a merge — matches
+`when`'s own CLAUDE.md rule about never pushing to `deploy` without
+explicit go-ahead). One runner, labeled `git-deploy`, per **server** —
+not per app — registered once and shared by every app's workflow on that
+box, mirroring the toolkit's own "one hook shared by every app" design.
+See README.md's "Triggering deploys from GitHub Actions" for the actual
+setup steps (this is server-side runner registration, so — like
+`install.sh` — it can't be done from within this repo, only documented).
+
 ## Architecture
 
 ```

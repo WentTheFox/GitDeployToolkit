@@ -145,6 +145,12 @@ changes, it's the source of truth for the intended UX.
   that same VPS sharing the same codebase but deployed to a separate
   worktree is **not** migrated — left untouched. See `servers.local.yml`
   for exactly which apps and paths.
+- **A third app on the second VPS is now migrated too:** a Node/pm2 app
+  (single stateless process, no queue worker/SSR) with no PHP-FPM
+  involved at all — simplest `deploy.conf` shape so far (plain
+  `deploy_build`/`deploy_restart`, no `artisan down`/`up` bracket, no
+  storage-permission concerns). Verified with two real `git push deploy
+  main` runs. See `servers.local.yml` for exactly which app.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.
@@ -236,6 +242,27 @@ changes, it's the source of truth for the intended UX.
   and defer the actual `return 1` to the very end of `deploy_restart`,
   using a plain (non-`local`) variable so it survives from `deploy_build`
   into `deploy_restart` — they run in the same sourced shell.
+- **A genuinely best-effort step (not "the build failed", just "one
+  optional side effect of deploying didn't work") needs the same
+  `set -e` guard as the build-failure case above, even though nothing
+  is bracketing a maintenance window.** Migrating a Node/pm2 app whose
+  old hand-rolled hook ran `npm run sync-commands` (registers Discord
+  slash commands, decoupled from and non-critical to the app's actual
+  process) as a plain, unguarded command hit this on the *first* real
+  toolkit deploy: a transient Discord API timeout made that command
+  exit non-zero, and the shared hook's inherited `set -e` aborted
+  `deploy_build` right there — `deploy_restart` never ran at all, even
+  though the worktree's `git checkout -f` had already landed the new
+  code. `pm2 describe` showed an unchanged restart count/uptime after
+  the push, which is the tell (a "successful" push with no actual
+  restart). The old script never had this problem since it was a plain
+  `sh` hook with no `set -e` — the toolkit's stricter shell is what
+  surfaced it. Fix: wrap the optional step, not the whole function —
+  `if ! optional_cmd; then echo "...continuing anyway" >&2; fi` — so a
+  non-critical failure logs and moves on instead of silently skipping
+  the restart. Don't assume porting an old script's commands verbatim
+  into `deploy_build` preserves its failure behavior; audit each
+  command for whether the old script would have tolerated it failing.
 - **`deploy_build`/`deploy_restart` run as the deploy user (e.g. the git
   user pushing over SSH), not the web server user — files they create
   or regenerate (Laravel's `storage/`, `bootstrap/cache/`, framework

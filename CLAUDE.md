@@ -69,6 +69,7 @@ target the `git-deploy` label).
 /srv/git/<app>.git                       bare repo per app
   hooks/post-receive -> symlink to the shared hook (so toolkit updates propagate instantly)
   deploy.env                             server-side only, NOT in git: WORKTREE=, BRANCH=
+  deploy.jsonl                           server-side only, NOT in git: JSON-lines deploy history
 /var/www/<app>/                          worktree = what's actually served
   deploy.conf                            IN THE APP'S OWN REPO, committed there
 ```
@@ -86,6 +87,15 @@ to decide whether to fully restart or send a graceful-reload signal
 (discord.js ShardingManager use case). Treat these as part of the
 deploy.conf contract, not incidental — don't rename/remove them from
 the hook without checking that example.
+
+Each push also appends a `start` and `complete` JSON-line to
+`$GIT_DIR/deploy.jsonl` (branch, commit, prev_commit, timestamps,
+duration, and on complete a `status` of `success`/`failed` based on
+`deploy_build`/`deploy_restart`'s exit code) — lets an agent working on
+the server check when an app was last deployed without asking. Errors
+from `deploy_build`/`deploy_restart` are caught (not left to `set -e`
+kill the hook outright) specifically so the `complete` line still gets
+written before the hook exits non-zero.
 
 `bin/git-deploy-new <app> [worktree] [branch]`: one-time per-app,
 per-server setup — creates the bare repo, worktree dir, `deploy.env`,

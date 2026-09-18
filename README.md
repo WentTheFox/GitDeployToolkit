@@ -15,6 +15,7 @@ in-place over the previous checkout, then runs the app's own
 /srv/git/<app>.git                       <- bare repo per app
   hooks/post-receive -> symlink to the shared hook
   deploy.env                             <- server-side: WORKTREE, BRANCH
+  deploy.jsonl                           <- server-side: JSON-lines deploy history
 /var/www/<app>/                          <- worktree (what's actually served)
   deploy.conf                            <- IN THE APP'S OWN REPO, committed
 ```
@@ -168,6 +169,24 @@ that disappears after the job. A few things matter more than the rest:
   (see "sudo for restarts" below) exactly as narrow as any other deploy
   path already requires — the GitHub Actions trigger doesn't need any
   privilege beyond what `git push deploy main` already needed by hand.
+
+## Deploy log
+
+Every push appends a `start` and a `complete` JSON-line to
+`<bare-repo>/deploy.jsonl` (e.g. `/srv/git/myapp.git/deploy.jsonl`) — never
+tracked, server-side only, the bare-repo equivalent of a worktree's
+`.git/deploy.jsonl`. This is the source of truth for "when was this last
+deployed" and "did it succeed" — handy for an LLM agent debugging on the
+server to check without asking:
+
+```json
+{"event":"start","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea..."}
+{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4}
+```
+
+`status` is `success` or `failed` (`deploy_build`/`deploy_restart`
+returned non-zero). If a `start` line has no matching `complete` line,
+the hook itself crashed (e.g. during checkout) before finishing.
 
 ## sudo for restarts
 

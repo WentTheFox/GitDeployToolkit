@@ -11,12 +11,19 @@
 #   $WORKTREE/deploy.conf        (in the app's own repo, versioned there)
 #     deploy_build()   { ... }   # optional
 #     deploy_restart() { ... }   # optional
+#
+# Every deploy also appends JSON-lines to $GIT_DIR/deploy.jsonl (server-side,
+# never tracked — GIT_DIR here is the bare repo, so this is the toolkit's
+# equivalent of a worktree's .git/deploy.jsonl). One "start" line and one
+# "complete" line per push, so an agent can grep the last line for when the
+# app was last deployed and whether it succeeded.
 
 set -euo pipefail
 
 GIT_DIR=$(git rev-parse --git-dir)
 GIT_DIR=$(cd "$GIT_DIR" && pwd)
 ENV_FILE="$GIT_DIR/deploy.env"
+DEPLOY_LOG="$GIT_DIR/deploy.jsonl"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "git-deploy: missing $ENV_FILE — run git-deploy-new to set this app up" >&2
@@ -27,6 +34,13 @@ fi
 source "$ENV_FILE"
 : "${WORKTREE:?WORKTREE not set in $ENV_FILE}"
 : "${BRANCH:=main}"
+
+# $1 = event (start|complete), $2 = extra JSON fields (leading comma, or "")
+log_deploy_event() {
+  printf '{"event":"%s","time":"%s","branch":"%s","commit":"%s","prev_commit":"%s"%s}\n' \
+    "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BRANCH" "$newrev" "$oldrev" "$2" \
+    >> "$DEPLOY_LOG"
+}
 
 while read -r oldrev newrev ref; do
   if [[ "$ref" != "refs/heads/$BRANCH" ]]; then
@@ -39,16 +53,24 @@ while read -r oldrev newrev ref; do
     continue
   fi
 
+  DEPLOY_START_EPOCH=$(date +%s)
+  log_deploy_event "start" ""
+
   mkdir -p "$WORKTREE"
   echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
   git --work-tree="$WORKTREE" --git-dir="$GIT_DIR" checkout -f "$BRANCH"
 
+  DEPLOY_STATUS="success"
   APP_CONF="$WORKTREE/deploy.conf"
   if [[ -f "$APP_CONF" ]]; then
     # Run in a subshell so deploy_build/deploy_restart from a previous
     # iteration (unlikely, but defensive) can't leak, and so `cd` here
-    # never affects the rest of the hook.
+    # never affects the rest of the hook. Errors are captured (rather than
+    # left to `set -e` kill the hook outright) so a "complete" line with
+    # status=failed always gets logged before we exit non-zero.
+    set +e
     (
+      set -e
       cd "$WORKTREE"
       # shellcheck source=/dev/null
       source "$APP_CONF"
@@ -63,9 +85,21 @@ while read -r oldrev newrev ref; do
         deploy_restart
       fi
     )
+    if [[ $? -ne 0 ]]; then
+      DEPLOY_STATUS="failed"
+    fi
+    set -e
   else
     echo "git-deploy: no deploy.conf in repo root, skipping build/restart"
   fi
 
+  DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
+  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION"
+
   echo "git-deploy: deployed $newrev to $WORKTREE"
+
+  if [[ "$DEPLOY_STATUS" == "failed" ]]; then
+    echo "git-deploy: deploy_build/deploy_restart failed for $WORKTREE — see $DEPLOY_LOG" >&2
+    exit 1
+  fi
 done

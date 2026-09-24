@@ -408,8 +408,10 @@ one host) surfaced two real bugs, neither obvious in advance:
   pattern, now in `template/deploy.conf.example`: decide migrations in
   the tracked `deploy.conf` via an explicit `$GIT_DIR` allowlist that
   fails closed. Keep untracked overrides for harmless things (process
-  names), never for "don't do the dangerous thing". Applying this to
-  SledgeHammerTime's own `deploy.conf` is still pending.
+  names), never for "don't do the dangerous thing". Applied to
+  SledgeHammerTime's own `deploy.conf` and verified on both targets:
+  prod still migrates, beta prints "not migrating" even with its old
+  `SKIP_MIGRATE=false` override present.
 
 ## Pitfalls hit migrating an app with no prior maintenance-mode bracket at all
 

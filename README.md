@@ -27,6 +27,11 @@ in-place over the previous checkout, then runs the app's own
   where the per-app variations live — build command, restart command,
   anything else. Because it travels with the app's own history, it's
   versioned, reviewable, and identical across servers automatically.
+  If several bare repos deploy the same `deploy.conf` (prod + a beta
+  copy), gate risky per-target steps like DB migrations on `$GIT_DIR`
+  with an explicit allowlist in `deploy.conf` itself, failing closed —
+  not on a flag in an untracked file whose absence means "do it". See
+  `template/deploy.conf.example`.
 
 ## Server setup (once per VPS)
 

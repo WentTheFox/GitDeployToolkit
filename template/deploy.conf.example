@@ -36,6 +36,21 @@ deploy_restart() {
 #   pm2 reload myapp
 # }
 
+# --- Several deploy targets sharing this file -------------------------
+# If more than one bare repo deploys this same deploy.conf (e.g. prod +
+# a beta copy), decide dangerous per-target steps like DB migrations
+# HERE, keyed on $GIT_DIR, and fail closed: only an explicitly listed
+# target runs them. Don't make "run it" the default and rely on an
+# untracked per-worktree file to turn it off — if that file is ever lost
+# or re-created without the flag, the default silently flips back on.
+#
+# deploy_build() {
+#   case "$(basename "$GIT_DIR")" in
+#     myapp.git) php artisan migrate --force ;;
+#     *) echo "git-deploy: not migrating $(basename "$GIT_DIR") (not in deploy.conf's migrate allowlist)" ;;
+#   esac
+# }
+
 # Notes on sudo:
 # deploy_restart commands that need root (systemctl, etc.) require the
 # deploy user to have passwordless sudo for exactly that command. See

@@ -396,6 +396,21 @@ one host) surfaced two real bugs, neither obvious in advance:
   process name, same restart behavior, zero content diff) before beta
   was touched.
 
+- **Per-target safety flags in an untracked file fail open.**
+  SledgeHammerTime's `deploy.conf` defaults `SKIP_MIGRATE=false` and
+  lets beta's untracked `setup/deploy-config.sh` set it to `true` —
+  beta points at prod's database with a read-only role, so it must
+  never migrate. It works today, but nothing tracked says "beta must
+  not migrate": lose or recreate that file without the line and beta
+  silently tries to migrate (here it'd just fail on the read-only role;
+  with a write-capable role it would run migrations from the wrong
+  checkout). Flagged by a peer session (`hammertimebot-a5`). Fix
+  pattern, now in `template/deploy.conf.example`: decide migrations in
+  the tracked `deploy.conf` via an explicit `$GIT_DIR` allowlist that
+  fails closed. Keep untracked overrides for harmless things (process
+  names), never for "don't do the dangerous thing". Applying this to
+  SledgeHammerTime's own `deploy.conf` is still pending.
+
 ## Pitfalls hit migrating an app with no prior maintenance-mode bracket at all
 
 `Luna`'s old hand-rolled `post-receive.sh` never wrapped its deploy in

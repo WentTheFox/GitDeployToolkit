@@ -154,6 +154,19 @@ as `webhook`) plus `share/git-deploy-webhook`.
 
 Then: Actions tab -> "Deploy" -> Run workflow.
 
+### Several environments of one repo (e.g. production + beta)
+
+When one repo deploys to more than one worktree (each its own bare repo
+via `git-deploy-new`), give each bare repo's `deploy.env` the same
+`GITHUB_REPO` and a distinct `GITHUB_ENVIRONMENT` (leaving it out means
+`production`). In that app's `deploy.yml`, add a checkbox input per extra
+environment (the template has a commented-out `beta` one) and list every
+environment in the plan step's `ENVIRONMENTS`, in the order they should
+deploy. Run workflow then shows one checkbox each; the ticked ones deploy
+one at a time in that order, each as its own job and GitHub Deployment,
+and a failure stops the rest. The environments can even live on
+different servers — each server only acts on the repos it has.
+
 ### What ends up public
 
 On a public repo, deployment statuses and Actions logs are visible to
@@ -344,7 +357,7 @@ and jot that down there instead of in any tracked file.
 through the shared hook, signed deliveries through the real `webhook`
 daemon against a stub statuses API, and `deploy-webhook.yml`'s own
 log-tailing step. CI (`.github/workflows/test.yml`) runs it on every push
-and PR. Locally it needs `webhook` and PyYAML (`apt install webhook
+and PR. Locally it needs `webhook`, `jq` and PyYAML (`apt install webhook jq
 python3-yaml`), or point `WEBHOOK_BIN=`/`PYTHON=` at your own copies.
 
 ## Notes / deliberate simplifications

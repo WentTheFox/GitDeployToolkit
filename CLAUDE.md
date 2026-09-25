@@ -106,6 +106,14 @@ Non-obvious decisions, don't undo without a reason:
 - Status reporting needs a fine-grained PAT (Deployments RW only) on the
   server in `/etc/git-deploy/webhook.env`; without it the Actions run
   fails after 60s with "server never acknowledged".
+- **Several environments per repo** (user's request, for the
+  SledgeHammerTime prod + beta shape): the workflow has one boolean
+  checkbox input per environment and a `plan` job that turns the ticked
+  ones into a matrix, run with `max-parallel: 1` + `fail-fast` so they
+  deploy one at a time in `ENVIRONMENTS` order and a failure stops the
+  rest (two builds of one app on one VPS at once would just compete).
+  Server side needed nothing new: `GITHUB_ENVIRONMENT` in each bare
+  repo's deploy.env already routes them.
 - An EXIT trap reports `error` if the script dies unexpectedly after
   `in_progress` — found via a test mutation: without it, an unanticipated
   `set -e` abort left GitHub showing the deploy as running forever.
@@ -113,10 +121,12 @@ Non-obvious decisions, don't undo without a reason:
 Status (2026-09-25): **installed on the first VPS**, listener live
 behind its `webhook.` vhost; **Fantastick is the first app opted in**
 (`GITHUB_REPO` in its deploy.env, repo webhook created with the
-Deployments event only, `.github/workflows/deploy.yml` committed). The
-status-reporting token was still pending (user creates it) at the time
-of writing, and no real deploy through the button had been run yet —
-check `servers.local.yml` for current state. Second VPS: not installed.
+Deployments event only, `.github/workflows/deploy.yml` committed, status
+token installed) and its **first real button deploy succeeded**. The
+user dropped the type-to-confirm input and deleted a manually created
+`production` environment with reviewers (not needed; see the template's
+approval-gate comment if a gate is ever wanted). Check
+`servers.local.yml` for current state. Second VPS: not installed.
 Covered by `tests/run.sh` + CI.
 
 ## Architecture

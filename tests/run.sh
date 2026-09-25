@@ -5,8 +5,8 @@
 # statuses API, and deploy.yml's own log-tailing loop run against a
 # growing log. Nothing touches a real server or GitHub.
 #
-# Needs: bash, git, curl, openssl, python3 with PyYAML, and adnanh/webhook
-# (`apt install webhook python3-yaml`). Override the binaries with
+# Needs: bash, git, curl, openssl, jq, python3 with PyYAML, and
+# adnanh/webhook (`apt install webhook python3-yaml jq`). Override the binaries with
 # WEBHOOK_BIN=... / PYTHON=... (e.g. a venv's python that has pyyaml).
 #
 # Usage: tests/run.sh    (exit status = number of failed checks, capped)
@@ -17,7 +17,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WEBHOOK_BIN="${WEBHOOK_BIN:-webhook}"
 PYTHON="${PYTHON:-python3}"
 
-for bin in git curl openssl "$PYTHON" "$WEBHOOK_BIN"; do
+for bin in git curl openssl jq "$PYTHON" "$WEBHOOK_BIN"; do
   command -v "$bin" > /dev/null || { echo "tests: missing $bin" >&2; exit 2; }
 done
 "$PYTHON" -c 'import yaml' 2> /dev/null || { echo "tests: $PYTHON lacks PyYAML" >&2; exit 2; }
@@ -180,7 +180,7 @@ send 103 "$SIDE" > /dev/null; final 103
 check "commit not on main -> failure" bash -c "grep '/deployments/103/' '$T/statuses.txt' | grep -q 'is not on main'"
 check "... and nothing deployed" test "$(git -C "$BARE" rev-parse main)" = "$MAIN2"
 
-send 104 "$MAIN2" beta > /dev/null; final 104
+send 104 "$MAIN2" staging > /dev/null; final 104
 check "unknown environment -> error" has_state 104 error
 
 FAIL2=$(commit "break restart again" add)
@@ -196,6 +196,23 @@ send 107 "$MAIN3" > /dev/null; final 107
 check "same-commit redeploy runs the hook again" test "$(grep -cx "$MAIN3" "$WORKTREE/.deployed")" -eq 2
 send 108 "$MAIN1" > /dev/null; final 108
 check "older commit on main can be redeployed (rollback)" test "$(git -C "$BARE" rev-parse main)" = "$MAIN1"
+
+section "several environments of one repo"
+GIT_DEPLOY_LIB="$ROOT/share" GIT_DEPLOY_REPO_ROOT="$T/srv" \
+  "$ROOT/bin/git-deploy-new" app-beta "$T/www/app-beta" > /dev/null
+printf 'GITHUB_REPO=Test/App\nGITHUB_URL=%s\nGITHUB_ENVIRONMENT=beta\n' "$T/origin.git" >> "$T/srv/app-beta.git/deploy.env"
+PROD_BEFORE=$(git -C "$BARE" rev-parse main)
+send 120 "$MAIN3" beta > /dev/null; final 120
+check "environment picks the matching bare repo" test "$(git -C "$T/srv/app-beta.git" rev-parse main 2> /dev/null)" = "$MAIN3"
+check "... and deploys its own worktree" grep -qx "$MAIN3" "$T/www/app-beta/.deployed"
+check "... without touching production" test "$(git -C "$BARE" rev-parse main)" = "$PROD_BEFORE"
+check "deploy ids are tracked per environment" test "$(cat "$T/srv/app-beta.git/git-deploy-webhook.last-id")" = 120
+GIT_DEPLOY_LIB="$ROOT/share" GIT_DEPLOY_REPO_ROOT="$T/srv" \
+  "$ROOT/bin/git-deploy-new" app-beta2 "$T/www/app-beta2" > /dev/null
+printf 'GITHUB_REPO=test/app\nGITHUB_ENVIRONMENT=beta\n' >> "$T/srv/app-beta2.git/deploy.env"
+send 121 "$MAIN3" beta > /dev/null; final 121
+check "two bare repos claiming one environment -> error" has_state 121 error
+rm -rf "$T/srv/app-beta2.git"
 
 # A failure nobody anticipated (here: a read-only ref store) after
 # in_progress must still end in a final status, not "in progress" forever.
@@ -249,6 +266,25 @@ rm -f mock-status
 sed 's/-ge 60/-ge 1/' wait.sh > wait-short.sh
 rc=0; run_wait wait-short.sh > wait.out 2>&1 || rc=$?
 check "no acknowledgement -> exit 1 with a hint" bash -c "test $rc -eq 1 && grep -q 'never acknowledged' '$T/wait.out'"
+
+section "deploy-webhook.yml plan step"
+"$PYTHON" - "$ROOT/template/deploy-webhook.yml.example" > plan.sh <<'EOF2'
+import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["plan"]["steps"]
+print(next(s["run"] for s in steps if s.get("id") == "pick"))
+EOF2
+TEMPLATE_ENVS=$("$PYTHON" -c 'import sys,yaml; print(next(s for s in yaml.safe_load(open(sys.argv[1]))["jobs"]["plan"]["steps"] if s.get("id")=="pick")["env"]["ENVIRONMENTS"])' "$ROOT/template/deploy-webhook.yml.example")
+plan() { # plan <ENVIRONMENTS> <inputs json> -> prints the environments output, returns step's status
+  : > plan.out
+  ENVIRONMENTS="$1" INPUTS="$2" GITHUB_OUTPUT="$T/plan.out" bash plan.sh > plan.log 2>&1 || return $?
+  sed -n 's/^environments=//p' plan.out
+}
+check "template default: production only" test "$(plan "$TEMPLATE_ENVS" '{"production":"true"}')" = '["production"]'
+check "several ticked -> all, in ENVIRONMENTS order" test "$(plan "production beta" '{"beta":"true","production":"true"}')" = '["production","beta"]'
+check "unticked ones are skipped" test "$(plan "production beta" '{"production":"false","beta":"true"}')" = '["beta"]'
+check "real booleans work too" test "$(plan "production beta" '{"production":true,"beta":false}')" = '["production"]'
+check "nothing ticked -> fails" bash -c "! ENVIRONMENTS=production INPUTS='{\"production\":\"false\"}' GITHUB_OUTPUT=/dev/null bash '$T/plan.sh' > /dev/null 2>&1"
+check "listed without a checkbox -> fails" bash -c "! ENVIRONMENTS='production beta' INPUTS='{\"production\":\"true\"}' GITHUB_OUTPUT=/dev/null bash '$T/plan.sh' > /dev/null 2>&1"
 
 echo
 echo "$PASSED passed, $FAILED failed"

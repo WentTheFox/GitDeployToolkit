@@ -123,7 +123,10 @@ for env_file in "$REPO_ROOT"/*.git/deploy.env; do
     fi
   )
   if [[ "$match" == yes ]]; then
-    [[ -z "$BARE" ]] || die "both $BARE and $(dirname "$env_file") claim $REPO ($ENVIRONMENT) — fix their deploy.env"
+    if [[ -n "$BARE" ]]; then
+      report error "Two apps on this server claim $REPO ($ENVIRONMENT), fix their deploy.env"
+      die "both $BARE and $(dirname "$env_file") claim $REPO ($ENVIRONMENT) — fix their deploy.env"
+    fi
     BARE=$(dirname "$env_file")
   fi
 done

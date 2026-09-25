@@ -409,8 +409,9 @@ changes, it's the source of truth for the intended UX.
 ## Required for every migration: GitHub Deployments hookup
 
 Per the user, every app on the toolkit gets the GitHub side too — not
-optional, part of the migration itself (and every app migrated before
-this rule has been retrofitted). After the first real deploy through the
+optional, part of the migration itself. Every app migrated before this
+rule was retrofitted on 2026-09-25 (steps 1-3 done for all of them;
+whether steps 4-5 are done per app is tracked in `servers.local.yml`). After the first real deploy through the
 toolkit works, do README's "Once per app" steps under "Triggering deploys
 from GitHub":
 

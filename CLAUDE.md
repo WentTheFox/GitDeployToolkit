@@ -135,6 +135,20 @@ Non-obvious decisions, don't undo without a reason:
   `in_progress` — found via a test mutation: without it, an unanticipated
   `set -e` abort left GitHub showing the deploy as running forever.
 
+- **Discord notifications** (user's request, via a peer session for
+  HammerTimeBot, where Discord's `/github` webhook silently ignored
+  deployment events): optional `DISCORD_WEBHOOK_URL` in `deploy.env`;
+  `share/git-deploy-notify` posts a "started" and a final
+  success/failed embed. The user wanted both messages and explicitly
+  **no log output** in them. Sent from `share/post-receive` (the one
+  place every deploy passes exactly once — after the push-mode hand-off,
+  so a recorded push doesn't announce twice), with an EXIT trap in the
+  hook so a mid-deploy abort still ends in "failed". Only a button deploy
+  failing *before* the hook runs is announced by `git-deploy-webhook`
+  itself (`HOOK_RAN` guards against doubling). The URL never goes in
+  argv (curl `-K` from a pipe) or any output; the tests plant a canary
+  in it. Best-effort like everything else here: `|| true`, 5s cap.
+
 Status (2026-09-25): **installed on the first VPS**, listener live
 behind its `webhook.` vhost; **Fantastick is the first app opted in**
 (`GITHUB_REPO` in its deploy.env, repo webhook created with the

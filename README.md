@@ -339,6 +339,35 @@ server to check without asking:
 returned non-zero). If a `start` line has no matching `complete` line,
 the hook itself crashed (e.g. during checkout) before finishing.
 
+## Discord notifications (optional)
+
+Add a Discord channel webhook URL (channel settings → Integrations →
+Webhooks) to an app's `deploy.env`:
+
+```sh
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+```
+
+and every deploy of it posts two messages there: one when it starts (the
+commit range and the new commits' subjects) and one with the outcome
+(deployed / failed, duration). Both say how it was started ("git push" or
+"Deploy button") and link the public log when there is one. Button deploys,
+manual pushes and plain pushes of apps without GitHub all notify exactly
+once — the shared hook sends them (via `git-deploy-notify`), and a button
+deploy that fails before the hook even runs (commit not on the branch)
+gets a "failed" message from `git-deploy-webhook` instead. No command
+output is ever posted, and `@mentions` in commit subjects don't ping.
+
+It's strictly best-effort: Discord being slow (5s cap per message) or
+failing costs one `git-deploy: discord notification failed (...)` line,
+never the deploy. Use the plain webhook URL, not its `/github` variant —
+that one silently accepts deployment events without posting anything.
+
+Anyone with the URL can post to the channel, so it's never printed or put
+on a command line, and `deploy.env` should be readable by the deploy user
+only: `git-deploy-new` creates it `600`; for an older app,
+`chmod 600 /srv/git/<app>.git/deploy.env`.
+
 ## sudo for restarts
 
 `deploy_restart` often needs to restart a systemd unit as root. Scope

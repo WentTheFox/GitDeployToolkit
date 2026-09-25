@@ -17,6 +17,7 @@ fi
 
 install -d "$LIB_DIR"
 install -m 0755 "$SRC_DIR/share/post-receive" "$LIB_DIR/post-receive"
+install -m 0755 "$SRC_DIR/share/git-deploy-notify" "$LIB_DIR/git-deploy-notify"
 install -m 0755 "$SRC_DIR/bin/git-deploy-new" "$BIN_DIR/git-deploy-new"
 
 # Optional GitHub deployment webhook listener. Installing these files is

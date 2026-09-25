@@ -50,7 +50,7 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook bin/git-deploy-new install.sh tests/run.sh; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new install.sh tests/run.sh; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "hooks.json is valid JSON once templated" \
@@ -141,6 +141,20 @@ export GIT_DEPLOY_WEBHOOK_SECRET=test-secret GIT_DEPLOY_REPO_ROOT="$T/srv" \
 wait_until 10 curl -s -o /dev/null "http://127.0.0.1:$API_PORT/" || { echo "tests: stub API didn't start" >&2; exit 2; }
 wait_until 10 curl -s -o /dev/null "http://127.0.0.1:$HOOK_PORT/" || { cat webhook.log; exit 2; }
 
+# Discord messages (git-deploy-notify) go to the stub too. The canary is the
+# webhook's secret part, which must never show up anywhere but deploy.env.
+DISCORD_URL="http://127.0.0.1:$API_PORT/discord/1/SECRET-canary"
+echo "DISCORD_WEBHOOK_URL=$DISCORD_URL" >> "$BARE/deploy.env"
+: > statuses.txt.discord
+DMARK=0
+dmark() { DMARK=$(wc -l < statuses.txt.discord); }
+discord_new() { tail -n +$((DMARK + 1)) statuses.txt.discord; }
+discord_titles() { discord_new | jq -r '.embeds[0].title' | tr '\n' '|'; }
+# A webhook deploy's final GitHub status can land before its last Discord
+# message: wait for the expected count, then a moment more so a duplicate
+# would be counted too.
+dwait() { wait_until 10 test "$(wc -l < statuses.txt.discord)" -ge $((DMARK + $1)) || true; sleep 0.5; }
+
 send() { # send <id> <sha> [environment] [task] [secret] -> prints response body
   local body sig
   body=$(printf '{"action":"created","deployment":{"id":%s,"sha":"%s","environment":"%s","task":"%s"},"repository":{"full_name":"test/app"}}' \
@@ -160,7 +174,12 @@ settle() { sleep 1.5; } # for deliveries that should produce nothing at all
 
 # Bare repo is currently at FAIL1 from the manual push; fix it on GitHub.
 MAIN2=$(commit "fix restart" rm)
+dmark
 send 100 "$MAIN2" > /dev/null; final 100
+dwait 2
+check "discord: started + finished, once each" test "$(discord_titles)" = "Deploying App to production|Deployed App to production|"
+check "discord: names the trigger and links the log" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '.embeds[0].fields | (map(select(.value == \"Deploy button\")) | length == 1) and (map(select(.name == \"Log\" and (.value | contains(\"/logs/100-\")))) | length == 1)' > /dev/null"
+check "discord: start message lists the new commit" bash -c "head -$((DMARK + 1)) '$T/statuses.txt.discord' | tail -1 | jq -r '.embeds[0].description' | grep -q '• fix restart'"
 check "valid delivery -> in_progress" has_state 100 in_progress
 check "valid delivery -> success" has_state 100 success
 check "status links the log" bash -c "grep '/deployments/100/' '$T/statuses.txt' | grep -q '\"log_url\":\"http://127.0.0.1:$API_PORT/logs/100-'"
@@ -170,8 +189,10 @@ if grep -rq "$T" logs/; then not_ok "public log masks server paths" "$(public_lo
 check "public log shows progress" grep -q "git-deploy: running deploy_restart" <(public_log 100)
 check "every public log line is timestamped" bash -c "! grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4} git-deploy' <(cat '$T'/logs/100-*.log)"
 
+dmark
 send 100 "$MAIN2" > /dev/null; settle
 check "replayed id is ignored" test "$(statuses 100 | wc -l)" -eq 2
+check "... and not announced" test -z "$(discord_new)"
 send 99 "$MAIN2" > /dev/null; settle
 check "older id is ignored" test -z "$(statuses 99)"
 check "wrong signature is rejected" grep -q "Error occurred while evaluating hook rules" <(send 101 "$MAIN2" production git-deploy wrong-secret)
@@ -180,7 +201,10 @@ settle
 check "... and neither reports anything" test -z "$(statuses 101)$(statuses 102)"
 
 SIDE=$(git -C dev rev-parse side)
+dmark
 send 103 "$SIDE" > /dev/null; final 103
+dwait 1
+check "discord: failure before the hook ran -> one failed message" test "$(discord_titles)" = "Deploy of App to production failed|"
 check "commit not on main -> failure" bash -c "grep '/deployments/103/' '$T/statuses.txt' | grep -q 'is not on main'"
 check "... and nothing deployed" test "$(git -C "$BARE" rev-parse main)" = "$MAIN2"
 
@@ -188,7 +212,10 @@ send 104 "$MAIN2" staging > /dev/null; final 104
 check "unknown environment -> error" has_state 104 error
 
 FAIL2=$(commit "break restart again" add)
+dmark
 send 105 "$FAIL2" > /dev/null; final 105
+dwait 2
+check "discord: failing deploy.conf -> started + failed" test "$(discord_titles)" = "Deploying App to production|Deploy of App to production failed|"
 check "failing deploy.conf -> failure" has_state 105 failure
 check "public log names the failed command" grep -q "git-deploy: failed (exit 3) in deploy_restart: sh -c 'cat private-output.txt; exit 3'" <(public_log 105)
 if public_log 105 | grep -q TOPSECRET; then not_ok "public log omits command output" "$(public_log 105)"; else ok "public log omits command output"; fi
@@ -206,7 +233,11 @@ GIT_DEPLOY_LIB="$ROOT/share" GIT_DEPLOY_REPO_ROOT="$T/srv" \
   "$ROOT/bin/git-deploy-new" app-beta "$T/www/app-beta" > /dev/null
 printf 'GITHUB_REPO=Test/App\nGITHUB_URL=%s\nGITHUB_ENVIRONMENT=beta\n' "$T/origin.git" >> "$T/srv/app-beta.git/deploy.env"
 PROD_BEFORE=$(git -C "$BARE" rev-parse main)
+echo "DISCORD_WEBHOOK_URL=$DISCORD_URL" >> "$T/srv/app-beta.git/deploy.env"
+dmark
 send 120 "$MAIN3" beta > /dev/null; final 120
+dwait 2
+check "discord: names the environment" test "$(discord_titles)" = "Deploying App to beta|Deployed App to beta|"
 check "environment picks the matching bare repo" test "$(git -C "$T/srv/app-beta.git" rev-parse main 2> /dev/null)" = "$MAIN3"
 check "... and deploys its own worktree" grep -qx "$MAIN3" "$T/www/app-beta/.deployed"
 check "... without touching production" test "$(git -C "$BARE" rev-parse main)" = "$PROD_BEFORE"
@@ -221,9 +252,12 @@ rm -rf "$T/srv/app-beta2.git"
 # A failure nobody anticipated (here: a read-only ref store) after
 # in_progress must still end in a final status, not "in progress" forever.
 chmod a-w "$BARE/refs/heads"
+dmark
 send 110 "$MAIN3" > /dev/null; final 110
 chmod u+w "$BARE/refs/heads"
+dwait 1
 check "unexpected abort -> error status" has_state 110 error
+check "discord: unexpected abort -> one failed message" test "$(discord_titles)" = "Deploy of App to production failed|"
 
 section "GIT_DEPLOY_LOG_PUBLIC=full"
 GIT_DEPLOY_LOG_PUBLIC=full "$ROOT/share/git-deploy-webhook" test/app 111 "$FAIL2" production > /dev/null 2>&1 || true
@@ -248,7 +282,11 @@ manual_push() { # manual_push <env file> -> pusher's output
 created() { grep '/deployments {' statuses.txt | grep -c "\"ref\":\"$1\"" || true; }
 
 PUSH1=$(commit "manual push")
+dmark
 out=$(manual_push "$T/push.env")
+echo "$out" >> all-push-output.txt
+check "discord: started + finished, once each (no double via hand-off)" test "$(discord_titles)" = "Deploying App to production|Deployed App to production|"
+check "discord: trigger is git push, log linked" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '.embeds[0].fields | (map(select(.value == \"git push\")) | length == 1) and (map(select(.name == \"Log\")) | length == 1)' > /dev/null"
 check "creates a deployment for the pushed commit" test "$(created "$PUSH1")" -eq 1
 check "... with task git-deploy-push (which the webhook ignores)" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"task\":\"git-deploy-push\"'"
 check "... in the app's environment" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"environment\":\"production\"'"
@@ -277,7 +315,10 @@ check "... and still deploys" grep -qx "$PUSH_DOWN" "$WORKTREE/.deployed"
 
 PUSH3=$(commit "no token")
 grep -v TOKEN push.env > push-notoken.env
+dmark
 out=$(manual_push "$T/push-notoken.env")
+echo "$out" >> all-push-output.txt
+check "discord: unrecorded push still announced once" test "$(discord_titles)" = "Deploying App to production|Deployed App to production|"
 check "no token -> says so" grep -q "no GitHub token configured" <<< "$out"
 check "... and still deploys" grep -qx "$PUSH3" "$WORKTREE/.deployed"
 
@@ -286,6 +327,50 @@ out=$(manual_push "$T/push.env")
 check "failing manual push -> failure status" bash -c "grep -qE '/deployments/50[0-9]{2}/statuses .*\"failure\"' '$T/statuses.txt'"
 check "... and the pusher sees the failed command" grep -q "git-deploy: failed (exit 3) in deploy_restart" <<< "$out"
 commit "unbreak" rm > /dev/null
+
+section "discord notifications"
+TRICKY=$(commit $'quote " back\\slash\ttab @everyone')
+dmark
+out=$(manual_push "$T/push.env"); echo "$out" >> all-push-output.txt
+check "odd commit subjects still make valid JSON" test "$(discord_new | jq -c . 2> /dev/null | wc -l)" -eq 2
+check "... with the subject intact" grep -qF $'• quote " back\\slash\ttab @everyone' <(discord_new | head -1 | jq -r '.embeds[0].description')
+check "mentions are disabled in every message" test "$(jq -c '.allowed_mentions' statuses.txt.discord | sort -u)" = '{"parse":[]}'
+
+# The hook itself dying after "started" (here: checkout into a read-only
+# worktree) must still end with a "failed" message.
+(cd dev && echo x > newfile && git add newfile && git commit -q -m "add a file" && git push -q ../origin.git main)
+chmod a-w "$WORKTREE"
+dmark
+out=$(manual_push "$T/push.env"); echo "$out" >> all-push-output.txt
+chmod u+w "$WORKTREE"
+check "discord: hook aborting mid-deploy -> started + failed" test "$(discord_titles)" = "Deploying App to production|Deploy of App to production failed|"
+
+touch statuses.txt.discord-fail
+DOWN1=$(commit "discord returns 500")
+out=$(manual_push "$T/push.env"); echo "$out" >> all-push-output.txt
+rm statuses.txt.discord-fail
+check "discord 500 -> says so" grep -q "git-deploy: discord notification failed (HTTP 500)" <<< "$out"
+check "... and still deploys" grep -qx "$DOWN1" "$WORKTREE/.deployed"
+check "... and reports success" bash -c "grep -qE '/deployments/50[0-9]{2}/statuses .*\"success\"' <(tail -1 '$T/statuses.txt')"
+
+sed -i "s#^DISCORD_WEBHOOK_URL=.*#DISCORD_WEBHOOK_URL=http://127.0.0.1:$(free_port)/discord/1/SECRET-canary#" "$BARE/deploy.env"
+DOWN2=$(commit "discord unreachable")
+out=$(manual_push "$T/push.env"); echo "$out" >> all-push-output.txt
+check "discord unreachable -> says so" grep -q "git-deploy: discord notification failed (unreachable)" <<< "$out"
+check "... and still deploys" grep -qx "$DOWN2" "$WORKTREE/.deployed"
+
+sed -i '/^DISCORD_WEBHOOK_URL=/d' "$BARE/deploy.env"
+commit "no discord url" > /dev/null
+dmark
+out=$(manual_push "$T/push.env")
+check "no URL -> no message" test -z "$(discord_new)"
+if grep -qi discord <<< "$out"; then not_ok "... and no mention of it" "$out"; else ok "... and no mention of it"; fi
+
+if grep -rqF SECRET-canary logs/ statuses.txt webhook.log all-push-output.txt; then
+  not_ok "the webhook URL never leaks into logs, statuses or output" "$(grep -rF SECRET-canary logs/ statuses.txt webhook.log all-push-output.txt)"
+else
+  ok "the webhook URL never leaks into logs, statuses or output"
+fi
 
 # --- deploy.yml's wait/tail step ---------------------------------------
 

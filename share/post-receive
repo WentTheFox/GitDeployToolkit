@@ -42,6 +42,21 @@ log_deploy_event() {
     >> "$DEPLOY_LOG"
 }
 
+# Discord messages when a deploy starts and ends, if deploy.env has
+# DISCORD_WEBHOOK_URL (see git-deploy-notify). Best-effort, never fails the
+# deploy. Sent from here, the one place every deploy passes exactly once:
+# a push that hands off to git-deploy-webhook below comes back through
+# here with GIT_DEPLOY_NO_GITHUB set, and that's the run that notifies.
+NOTIFY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-notify"
+notify() { # notify <started|success|failed> [duration-s]
+  [[ -n "${DISCORD_WEBHOOK_URL:-}" && -x "$NOTIFY" ]] || return 0
+  "$NOTIFY" "$1" "$GIT_DIR" "$oldrev" "$newrev" "${2:-}" || true
+}
+# Something aborting the hook between the two (a failed checkout) must not
+# leave the channel thinking the deploy is still running.
+NOTIFY_PENDING=""
+trap '[[ -z "$NOTIFY_PENDING" ]] || notify failed "$(( $(date +%s) - DEPLOY_START_EPOCH ))"' EXIT
+
 while read -r oldrev newrev ref; do
   if [[ "$ref" != "refs/heads/$BRANCH" ]]; then
     echo "git-deploy: ignoring push to $ref (this app deploys $BRANCH only)" >&2
@@ -66,6 +81,8 @@ while read -r oldrev newrev ref; do
 
   DEPLOY_START_EPOCH=$(date +%s)
   log_deploy_event "start" ""
+  notify started
+  NOTIFY_PENDING=1
 
   mkdir -p "$WORKTREE"
   echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
@@ -117,6 +134,8 @@ while read -r oldrev newrev ref; do
 
   DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
   log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION"
+  NOTIFY_PENDING=""
+  notify "$DEPLOY_STATUS" "$DEPLOY_DURATION"
 
   if [[ "$DEPLOY_STATUS" == "failed" ]]; then
     echo "git-deploy: deploy_build/deploy_restart failed for $WORKTREE — see $DEPLOY_LOG" >&2

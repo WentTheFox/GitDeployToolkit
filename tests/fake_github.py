@@ -7,6 +7,10 @@ POST /repos/<owner>/<repo>/deployments
     What push mode creates deployments with. Recorded the same way, and
     answered with a new id (5000, 5001, ...) — or 422 like GitHub's "No ref
     found" when the ref is listed in <statuses-file>.unknown-refs.
+POST /discord/<id>/<token>
+    Stand-in for a Discord webhook: bodies appended one per line to
+    <statuses-file>.discord, 204 — or 500 while <statuses-file>.discord-fail
+    exists.
 GET /logs/<name>
     What deploy.yml tails: serves files from the directory in argv[3],
     honouring "Range: bytes=N-" the way nginx does (206 / 416).
@@ -29,6 +33,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"])).decode()
         auth = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        if self.path.startswith("/discord/"):
+            if os.path.exists(STATUSES + ".discord-fail"):
+                self.send_response(500)
+                self.end_headers()
+                return
+            with open(STATUSES + ".discord", "a") as f:
+                f.write(body.strip() + "\n")
+            self.send_response(204)
+            self.end_headers()
+            return
         with open(STATUSES, "a") as f:
             f.write(f"{self.path} {body} auth={auth}\n")
         if self.path.endswith("/deployments"):

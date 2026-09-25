@@ -31,6 +31,9 @@ fi
 mkdir -p "$REPO_ROOT" "$WORKTREE"
 git init --quiet --bare "$BARE_REPO"
 
+# 600: it may later hold a secret (DISCORD_WEBHOOK_URL). Only the deploy
+# user needs to read it.
+install -m 600 /dev/null "$BARE_REPO/deploy.env"
 cat > "$BARE_REPO/deploy.env" <<EOF
 WORKTREE=$WORKTREE
 BRANCH=$BRANCH

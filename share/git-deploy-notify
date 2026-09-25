@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Posts a deploy's start and outcome to a Discord channel. Run by the shared
+# post-receive hook (once when a deploy starts, once when it finishes) and
+# by git-deploy-webhook (for a button deploy that failed before the hook
+# ever ran). Opt-in per app, in the bare repo's deploy.env:
+#   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+# Anyone holding that URL can post to the channel, so it's never printed,
+# never passed on a command line, and deploy.env should be mode 600.
+#
+# Strictly best-effort: a slow or failing Discord costs at most a few
+# seconds and one line of output, never the deploy. Messages carry no
+# command output, only what ran where and how it ended (plus the log link
+# when there is one).
+#
+#   git-deploy-notify <started|success|failed> <bare-repo> <oldrev> <newrev> [duration-s]
+#
+# Environment (set by git-deploy-webhook for the deploys it runs):
+#   GIT_DEPLOY_TRIGGER   how the deploy was started, default "git push"
+#   GIT_DEPLOY_LOG_URL   the deploy's public log, linked when set
+
+set -uo pipefail
+
+EVENT="$1" BARE="$2" OLDREV="$3" NEWREV="$4" DURATION="${5:-}"
+ZERO=0000000000000000000000000000000000000000
+
+GITHUB_REPO="" GITHUB_ENVIRONMENT="" DISCORD_WEBHOOK_URL=""
+# shellcheck source=/dev/null
+source "$BARE/deploy.env" || exit 0
+[[ -n "$DISCORD_WEBHOOK_URL" ]] || exit 0
+# It goes into a curl config file below, where a quote would end it early.
+if [[ ! "$DISCORD_WEBHOOK_URL" =~ ^https?://[^[:space:]\"\\]+$ ]]; then
+  echo "git-deploy: DISCORD_WEBHOOK_URL in deploy.env is malformed, not notifying" >&2
+  exit 1
+fi
+
+json() { # json <string> -> the string as a JSON string literal
+  local s
+  s=$(tr -d '\000-\010\013\014\016-\037' <<< "$1")
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/}
+  printf '"%s"' "$s"
+}
+
+APP="${GITHUB_REPO:+${GITHUB_REPO#*/}}"
+APP="${APP:-$(basename "$BARE" .git)}"
+ENVIRONMENT="${GITHUB_ENVIRONMENT:-production}"
+WEB="${GITHUB_REPO:+https://github.com/$GITHUB_REPO}"
+
+commit_link() { # commit_link <sha>
+  if [[ -n "$WEB" ]]; then printf '[`%s`](%s/commit/%s)' "${1:0:7}" "$WEB" "$1"; else printf '`%s`' "${1:0:7}"; fi
+}
+if [[ "$OLDREV" == "$ZERO" ]]; then
+  range="$(commit_link "$NEWREV")"
+elif [[ "$OLDREV" == "$NEWREV" ]]; then
+  range="$(commit_link "$NEWREV") (redeploy)"
+elif [[ -n "$WEB" ]]; then
+  range="[\`${OLDREV:0:7}…${NEWREV:0:7}\`]($WEB/compare/$OLDREV...$NEWREV)"
+else
+  range="\`${OLDREV:0:7}…${NEWREV:0:7}\`"
+fi
+
+description="$range"
+if [[ "$EVENT" == started ]]; then
+  # What's going out: the new commits' subjects (none for a rollback).
+  if [[ "$OLDREV" == "$ZERO" ]]; then revs=(-1 "$NEWREV"); else revs=("$OLDREV..$NEWREV"); fi
+  count=$(git --git-dir="$BARE" rev-list --count "${revs[@]}" 2> /dev/null || echo 0)
+  subjects=$(git --git-dir="$BARE" log --format='• %s' -5 "${revs[@]}" 2> /dev/null || true)
+  [[ -z "$subjects" ]] || description+=$'\n'"$subjects"
+  (( count <= 5 )) || description+=$'\n'"…and $(( count - 5 )) more"
+fi
+
+case "$EVENT" in
+  started) title="Deploying $APP to $ENVIRONMENT" color=3447003 ;;
+  success) title="Deployed $APP to $ENVIRONMENT" color=3066993 ;;
+  failed) title="Deploy of $APP to $ENVIRONMENT failed" color=15158332 ;;
+  *) echo "git-deploy-notify: unknown event $EVENT" >&2; exit 1 ;;
+esac
+
+fields="{\"name\":\"Trigger\",\"value\":$(json "${GIT_DEPLOY_TRIGGER:-git push}"),\"inline\":true}"
+[[ -z "$DURATION" ]] || fields+=",{\"name\":\"Duration\",\"value\":$(json "${DURATION}s"),\"inline\":true}"
+[[ -z "${GIT_DEPLOY_LOG_URL:-}" ]] || fields+=",{\"name\":\"Log\",\"value\":$(json "[view]($GIT_DEPLOY_LOG_URL)"),\"inline\":true}"
+
+# allowed_mentions: a commit subject saying @everyone must not ping anyone.
+body="{\"allowed_mentions\":{\"parse\":[]},\"embeds\":[{\"title\":$(json "$title"),\"description\":$(json "$description"),\"color\":$color,\"fields\":[$fields],\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}"
+
+# The URL goes in through a config file (a pipe), so it's never in argv
+# for `ps` to show; curl's own errors would name it, so they're dropped.
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+  -H 'Content-Type: application/json' --data-binary @- \
+  -K <(printf 'url = "%s"\n' "$DISCORD_WEBHOOK_URL") <<< "$body" 2> /dev/null)
+if [[ "$code" != 2?? ]]; then
+  if [[ "$code" == 000 ]]; then reason="unreachable"; else reason="HTTP $code"; fi
+  echo "git-deploy: discord notification failed ($reason)" >&2
+  exit 1
+fi

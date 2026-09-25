@@ -144,11 +144,19 @@ report() { # report <state> <description>
 
 # Whatever goes wrong after "in_progress" (a set -e abort we didn't
 # anticipate), never leave GitHub showing a deploy that's running forever.
+# And a deploy that failed before the hook ran (commit not on the branch,
+# fetch failed, ...) still gets its Discord message — once the hook runs,
+# it sends its own.
+HOOK_RAN="" current=""
 on_exit() {
   local rc=$?
   if [[ -n "$STARTED" && -z "$FINISHED" ]]; then
     report error "Deploy aborted unexpectedly (exit $rc), see the log"
     log "deployment $DEPLOYMENT_ID aborted unexpectedly (exit $rc)"
+  fi
+  if [[ -n "$STARTED" && -z "$HOOK_RAN" && $rc -ne 0 ]]; then
+    GIT_DEPLOY_LOG_URL="$LOG_URL" "$(dirname "$(readlink -f "$0")")/git-deploy-notify" \
+      failed "$BARE" "${current:-$ZERO}" "$SHA" || true
   fi
 }
 trap on_exit EXIT
@@ -234,6 +242,7 @@ if [[ "$MODE" == push ]]; then
   fi
   if [[ "$DEPLOYMENT_ID" == 0 ]]; then
     # Nothing to report to: just deploy, exactly as the hook would have.
+    HOOK_RAN=1
     echo "$OLDREV $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DIR=. ./hooks/post-receive)
     exit
   fi
@@ -269,7 +278,10 @@ report in_progress "Deploying"
 if [[ "$MODE" == push ]]; then
   # receive-pack already moved the ref; just run the deploy.
   current="$OLDREV"
+  TRIGGER="git push"
 else
+  TRIGGER="Deploy button"
+  current=$(git -C "$BARE" rev-parse --verify --quiet "refs/heads/$BRANCH" || echo "$ZERO")
   # Fetch GitHub's current $BRANCH and only deploy a commit that's actually on
   # it. Even if the webhook secret leaked, a forged delivery can then only
   # ever deploy code that's already on the real $BRANCH — never an arbitrary
@@ -295,14 +307,15 @@ else
   # that GitHub doesn't have, or this may intentionally be an older commit
   # on $BRANCH. Same-commit redeploys still run the hook (a real push would
   # be a no-op) — the button was clicked on purpose.
-  current=$(git -C "$BARE" rev-parse --verify --quiet "refs/heads/$BRANCH" || echo "$ZERO")
   [[ "$current" != "$SHA" ]] || log "$BRANCH is already at $SHA, redeploying it"
   git -C "$BARE" update-ref -m "git-deploy-webhook: deployment $DEPLOYMENT_ID" "refs/heads/$BRANCH" "$SHA"
 fi
 
 # GIT_DEPLOY_NO_GITHUB: this deploy is already being recorded, so the hook
-# mustn't hand off to push mode again.
-if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
+# mustn't hand off to push mode again. The other two are for its Discord
+# messages (git-deploy-notify).
+HOOK_RAN=1
+if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DEPLOY_TRIGGER="$TRIGGER" GIT_DEPLOY_LOG_URL="$LOG_URL" GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
   report success "Deployed ${SHA:0:12}"
   log "deployment $DEPLOYMENT_ID succeeded"
 else

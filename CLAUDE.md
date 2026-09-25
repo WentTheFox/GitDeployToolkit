@@ -126,7 +126,10 @@ token installed) and its **first real button deploy succeeded**. The
 user dropped the type-to-confirm input and deleted a manually created
 `production` environment with reviewers (not needed; see the template's
 approval-gate comment if a gate is ever wanted). Check
-`servers.local.yml` for current state. Second VPS: not installed.
+`servers.local.yml` for current state. Second VPS: installed too, with
+SledgeHammerTime opted in for production + beta (the first
+multi-environment app), pending DNS and its status token at the time of
+writing.
 Covered by `tests/run.sh` + CI.
 
 ## Architecture

@@ -152,7 +152,7 @@ as `webhook`) plus `share/git-deploy-webhook`.
    runner and its `DEPLOY_REMOTE_URL` secret.)
 4. Add the repo to the server's token's repository list.
 
-Then: Actions tab -> "Deploy" -> Run workflow -> type `deploy`.
+Then: Actions tab -> "Deploy" -> Run workflow.
 
 ### What ends up public
 

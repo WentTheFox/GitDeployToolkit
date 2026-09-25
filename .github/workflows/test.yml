@@ -1,0 +1,35 @@
+# Runs tests/run.sh: the toolkit's end-to-end tests (hook, webhook listener,
+# deploy workflow's log tailing), all against local throwaway repos and
+# stub HTTP servers on a GitHub-hosted runner. Nothing here can reach a
+# real server, so running it for PRs from forks is fine.
+
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq webhook python3-yaml
+          webhook -version
+
+      - name: Run tests
+        run: tests/run.sh

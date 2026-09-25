@@ -106,14 +106,18 @@ Non-obvious decisions, don't undo without a reason:
 - Status reporting needs a fine-grained PAT (Deployments RW only) on the
   server in `/etc/git-deploy/webhook.env`; without it the Actions run
   fails after 60s with "server never acknowledged".
+- An EXIT trap reports `error` if the script dies unexpectedly after
+  `in_progress` — found via a test mutation: without it, an unanticipated
+  `set -e` abort left GitHub showing the deploy as running forever.
 
-Status: drafted and tested locally only (real `webhook` 2.8.0 binary,
-signed deliveries, stub statuses API, range-request log tailing). **Not
-yet installed on either VPS, no app opted in yet.**
-
-Testing note: this checkout has `core.autocrlf=true` (user's global
-config), so working-copy scripts are CRLF and won't run as-is — copy
-them to the scratchpad and strip `\r` before a local test.
+Status (2026-09-25): **installed on the first VPS**, listener live
+behind its `webhook.` vhost; **Fantastick is the first app opted in**
+(`GITHUB_REPO` in its deploy.env, repo webhook created with the
+Deployments event only, `.github/workflows/deploy.yml` committed). The
+status-reporting token was still pending (user creates it) at the time
+of writing, and no real deploy through the button had been run yet —
+check `servers.local.yml` for current state. Second VPS: not installed.
+Covered by `tests/run.sh` + CI.
 
 ## Architecture
 
@@ -540,9 +544,13 @@ fail first.
 - Keep `README.md` and this file in sync with any architecture change —
   README is user-facing usage docs, this file is session-resumption
   context. Update both, not just one.
-- Test hook changes the way the existing commit did: a throwaway bare
-  repo + worktree under `/tmp`, real `git push`, inspect the resulting
-  worktree — rather than trusting `bash -n` alone or guessing.
+- Test hook/webhook changes with `tests/run.sh` (also runs in CI): a
+  throwaway bare repo + worktree, real `git push`, real signed webhook
+  deliveries, inspecting the result — rather than trusting `bash -n`
+  alone or guessing. Add a case there for any new behavior, and check it
+  actually fails when the behavior is broken (break it on purpose once).
+- `.gitattributes` forces LF: the user's global `core.autocrlf=true`
+  used to check scripts out as CRLF, which bash can't run.
 - Real hostnames/IPs/paths for the user's actual servers are **always**
   sensitive — never go in tracked files, unconditionally, whether or not
   any app on that server is flagged `sensitive`. `servers.local.yml`

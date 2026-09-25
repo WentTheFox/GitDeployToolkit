@@ -1,0 +1,4 @@
+# Everything here is shell/config that runs on Linux servers (and in CI):
+# always check out with LF, even under core.autocrlf=true — CRLF scripts
+# fail with "bash\r: No such file or directory".
+* text=auto eol=lf

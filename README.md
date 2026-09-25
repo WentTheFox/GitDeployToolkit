@@ -337,6 +337,16 @@ But which host is which, and what's deployed where, isn't derivable from
 the code. Copy `servers.example.yml` to `servers.local.yml` (gitignored)
 and jot that down there instead of in any tracked file.
 
+## Tests
+
+`tests/run.sh` runs end-to-end tests entirely locally — a throwaway
+"GitHub" origin, a bare repo made by `git-deploy-new`, real pushes
+through the shared hook, signed deliveries through the real `webhook`
+daemon against a stub statuses API, and `deploy-webhook.yml`'s own
+log-tailing step. CI (`.github/workflows/test.yml`) runs it on every push
+and PR. Locally it needs `webhook` and PyYAML (`apt install webhook
+python3-yaml`), or point `WEBHOOK_BIN=`/`PYTHON=` at your own copies.
+
 ## Notes / deliberate simplifications
 
 - Deploys check the branch out **in-place** (no releases/current

@@ -79,8 +79,12 @@ ENVIRONMENT="${4:-production}"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "bad sha: $SHA"
 [[ "$ENVIRONMENT" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad environment: $ENVIRONMENT"
 
-LOG_URL=""
+LOG_URL="" STARTED="" FINISHED=""
 report() { # report <state> <description>
+  case "$1" in
+    in_progress) STARTED=1 ;;
+    *) FINISHED=1 ;;
+  esac
   [[ -n "${GIT_DEPLOY_GITHUB_TOKEN:-}" ]] || return 0
   local body="{\"state\":\"$1\",\"description\":\"$2\""
   [[ -z "$LOG_URL" ]] || body+=",\"log_url\":\"$LOG_URL\""
@@ -94,6 +98,17 @@ report() { # report <state> <description>
     log "couldn't report '$1' status to GitHub (continuing anyway)" >&2
   fi
 }
+
+# Whatever goes wrong after "in_progress" (a set -e abort we didn't
+# anticipate), never leave GitHub showing a deploy that's running forever.
+on_exit() {
+  local rc=$?
+  if [[ -n "$STARTED" && -z "$FINISHED" ]]; then
+    report error "Deploy aborted unexpectedly (exit $rc), see the log"
+    log "deployment $DEPLOYMENT_ID aborted unexpectedly (exit $rc)"
+  fi
+}
+trap on_exit EXIT
 
 # Find the bare repo whose deploy.env opts in for this repo + environment.
 # Case-insensitive on the repo name, since GitHub is.

@@ -434,8 +434,22 @@ from GitHub":
    style (check for commitlint/conventional commits first) and pushed to
    `origin`.
 4. The repo added to the server's token for its owner (user action: the
-   user manages tokens; ask, don't guess whether it's done), and the
-   Deployments sidebar section enabled (user action, no API for it).
+   user manages tokens), and the Deployments sidebar section enabled
+   (user action, no API for it). Check token coverage instead of asking,
+   without side effects or printing the token: from the server, POST an
+   invalid (empty) deployment with the token that repo would use —
+   **422** = token can write deployments there, **403** "Resource not
+   accessible by personal access token" = it can't (a missing-ref
+   request is rejected before anything is created either way):
+   ```sh
+   ssh <host> 'set -a; . /etc/git-deploy/webhook.env; set +a; curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Authorization: Bearer $GIT_DEPLOY_GITHUB_TOKEN" https://api.github.com/repos/<owner>/<repo>/deployments -d "{}"'
+   ```
+   (Use `$GIT_DEPLOY_GITHUB_TOKEN_<OWNER>` for a repo whose owner has
+   its own token.) Don't probe with a status POST to a made-up
+   deployment id: GitHub answers 404 for the missing deployment before
+   checking permissions, so it can't tell access from no access. And a
+   fine-grained token can't be "reused" across owners — its resource
+   owner is fixed at creation.
 5. Verify with a real manual `git push deploy` or button run (with the
    user's go-ahead, as always) that a Deployment appears with status and
    log.

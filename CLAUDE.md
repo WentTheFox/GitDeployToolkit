@@ -251,6 +251,13 @@ changes, it's the source of truth for the intended UX.
   `deploy_build`/`deploy_restart`, no `artisan down`/`up` bracket, no
   storage-permission concerns). Verified with two real `git push deploy
   main` runs. See `servers.local.yml` for exactly which app.
+- **`DoubleColonBot` (first VPS) migrated 2026-09-25**, the first app
+  migrated with the GitHub Deployments hookup as a required step: done
+  *before* its first toolkit deploy, so that one push also served as the
+  first real test of manual-push recording (worked — a `git-deploy-push`
+  Deployment with status and log). Its old script's "rebuild on lockfile
+  change" check could never match (`package-lock.json/`); fixed in the
+  port. Cleanup done except deploying the old script's removal.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.

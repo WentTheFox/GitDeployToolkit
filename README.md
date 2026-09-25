@@ -123,7 +123,11 @@ as `webhook`) plus `share/git-deploy-webhook`.
      permission **Deployments: Read and write** and nothing else. Without
      it deploys still run, but GitHub never hears the result. Note its
      expiry date somewhere; an expired token looks like "the server never
-     acknowledged" in the Actions run.
+     acknowledged" in the Actions run. A fine-grained token covers one
+     owner only, so for apps under an organization add another one as
+     `GIT_DEPLOY_GITHUB_TOKEN_<OWNER>` (owner name uppercased, `-`/`.` as
+     `_`, e.g. `GIT_DEPLOY_GITHUB_TOKEN_MLP_VECTORCLUB`); it takes
+     precedence for that owner's repos.
    - `GIT_DEPLOY_LOG_BASE_URL` — `https://webhook.example.com/logs`.
 4. nginx: adapt `template/nginx-webhook.conf.example` (server name, the
    server's usual TLS setup — Cloudflare origin cert snippet or
@@ -171,6 +175,18 @@ deploy. Run workflow then shows one checkbox each; the ticked ones deploy
 one at a time in that order, each as its own job and GitHub Deployment,
 and a failure stops the rest. The environments can even live on
 different servers — each server only acts on the repos it has.
+
+### Manual pushes show up too
+
+Once an app's `deploy.env` has `GITHUB_REPO`, a plain `git push deploy
+main` is recorded on GitHub as well: the shared hook hands the push to
+`git-deploy-webhook --push`, which creates a Deployment for the pushed
+commit (task `git-deploy-push`, which the webhook ignores, so nothing
+deploys twice), then reports status and writes the same public log as a
+button deploy. Your terminal still shows the full output. If GitHub
+can't take it — no token for that repo's owner, the API unreachable, or
+a commit you haven't pushed to GitHub yet — the push says why in one
+line and deploys exactly as before, just unrecorded.
 
 ### What ends up public
 

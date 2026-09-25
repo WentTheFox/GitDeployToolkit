@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
-# Run by the `webhook` daemon (adnanh/webhook, see share/webhook-hooks.json)
-# when GitHub delivers a signed `deployment` event created by an app's
-# deploy.yml "Deploy" button. By the time this runs, webhook has already
-# verified the HMAC signature and that the event/task match — this script
-# decides WHICH app it's for and hands off to the ordinary push path, so a
-# GitHub-triggered deploy runs exactly the same post-receive hook and
-# deploy.conf as `git push deploy main` from a laptop.
+# Connects deploys to GitHub Deployments, in one of two modes:
 #
-# Usage (normally only called by webhook):
+# Webhook mode — run by the `webhook` daemon (adnanh/webhook, see
+# share/webhook-hooks.json) when GitHub delivers a signed `deployment`
+# event created by an app's deploy.yml "Deploy" button. By the time this
+# runs, webhook has already verified the HMAC signature and that the
+# event/task match — this script decides WHICH app it's for and hands off
+# to the ordinary push path, so a GitHub-triggered deploy runs exactly the
+# same post-receive hook and deploy.conf as `git push deploy main`.
 #   git-deploy-webhook <owner/repo> <deployment-id> <sha> <environment>
+#
+# Push mode — run by the shared post-receive hook for a manual `git push
+# deploy` to an app whose deploy.env has GITHUB_REPO, so those deploys show
+# up on GitHub too: creates the Deployment itself (task "git-deploy-push",
+# which the webhook's trigger rule ignores, so it doesn't deploy twice),
+# then reports and logs exactly like webhook mode, with output going back
+# to the pusher's terminal instead of the journal. If GitHub can't take it
+# (no token configured, or a commit GitHub doesn't have), the deploy just
+# runs as a plain push would.
+#   git-deploy-webhook --push <bare-repo> <oldrev> <newrev>
 #
 # Which bare repo a deployment maps to is read from each bare repo's own
 # deploy.env (server-side, same file the hook reads):
@@ -17,12 +27,19 @@
 #   GITHUB_URL=https://...          # optional, defaults to
 #                                   # https://github.com/$GITHUB_REPO.git
 #
-# Environment (from the systemd unit's EnvironmentFile):
+# Environment (from the systemd unit's EnvironmentFile; push mode reads the
+# same file itself, $GIT_DEPLOY_ENV_FILE, default /etc/git-deploy/webhook.env):
 #   GIT_DEPLOY_REPO_ROOT       defaults to /srv/git
 #   GIT_DEPLOY_GITHUB_TOKEN    optional; if set, deployment statuses
 #                              (in_progress/success/failure) are reported
 #                              back to GitHub so the Actions run and the
 #                              repo's Deployments page show the real result.
+#   GIT_DEPLOY_GITHUB_TOKEN_<OWNER>
+#                              same, for repos of one owner (user or org),
+#                              taking precedence — a fine-grained token only
+#                              covers one owner. <OWNER> is the owner's name
+#                              uppercased, with - and . as _, e.g.
+#                              GIT_DEPLOY_GITHUB_TOKEN_MLP_VECTORCLUB.
 #   GIT_DEPLOY_LOG_DIR         optional; if set (with the next one), each
 #   GIT_DEPLOY_LOG_BASE_URL    deploy gets a log file there under an
 #                              unguessable name, served by nginx at
@@ -47,7 +64,9 @@ ZERO=0000000000000000000000000000000000000000
 # Log straight to the journal as we go when possible — webhook itself only
 # logs a command's output after it exits (and only with -verbose), which is
 # useless for watching a multi-minute build.
-if [[ -z "${GIT_DEPLOY_WEBHOOK_NO_JOURNAL:-}" ]] && command -v systemd-cat > /dev/null; then
+MODE=webhook
+[[ "${1:-}" != --push ]] || MODE=push
+if [[ "$MODE" == webhook && -z "${GIT_DEPLOY_WEBHOOK_NO_JOURNAL:-}" ]] && command -v systemd-cat > /dev/null; then
   exec > >(systemd-cat -t git-deploy-webhook) 2>&1
 fi
 
@@ -69,25 +88,47 @@ log() {
 }
 die() { log "$*" >&2; exit 1; }
 
-REPO="${1:?Usage: git-deploy-webhook <owner/repo> <deployment-id> <sha> <environment>}"
-DEPLOYMENT_ID="${2:?missing deployment id}"
-SHA="${3:?missing sha}"
-ENVIRONMENT="${4:-production}"
+if [[ "$MODE" == push ]]; then
+  BARE="${2:?Usage: git-deploy-webhook --push <bare-repo> <oldrev> <newrev>}"
+  OLDREV="${3:?missing oldrev}"
+  SHA="${4:?missing newrev}"
+  ENV_FILE="${GIT_DEPLOY_ENV_FILE:-/etc/git-deploy/webhook.env}"
+  if [[ -r "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+  fi
+  # shellcheck source=/dev/null
+  source "$BARE/deploy.env"
+  REPO="${GITHUB_REPO:?GITHUB_REPO not set in $BARE/deploy.env}"
+  ENVIRONMENT="${GITHUB_ENVIRONMENT:-production}"
+  DEPLOYMENT_ID=0 # until GitHub gives us one
+else
+  REPO="${1:?Usage: git-deploy-webhook <owner/repo> <deployment-id> <sha> <environment>}"
+  DEPLOYMENT_ID="${2:?missing deployment id}"
+  SHA="${3:?missing sha}"
+  ENVIRONMENT="${4:-production}"
+fi
 
-# These come from the (signature-verified) payload, but still validate
-# their shape before they go anywhere near git or a URL.
+# In webhook mode these come from the (signature-verified) payload, but
+# still validate their shape before they go anywhere near git or a URL.
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "bad repo name: $REPO"
 [[ "$DEPLOYMENT_ID" =~ ^[0-9]+$ ]] || die "bad deployment id: $DEPLOYMENT_ID"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "bad sha: $SHA"
 [[ "$ENVIRONMENT" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad environment: $ENVIRONMENT"
+[[ "$MODE" != push || "$OLDREV" =~ ^[0-9a-f]{40}$ ]] || die "bad oldrev: $OLDREV"
 
+API="${GIT_DEPLOY_GITHUB_API:-https://api.github.com}"
+owner_var="GIT_DEPLOY_GITHUB_TOKEN_$(tr 'a-z.-' 'A-Z__' <<< "${REPO%%/*}")"
+GIT_DEPLOY_GITHUB_TOKEN="${!owner_var:-${GIT_DEPLOY_GITHUB_TOKEN:-}}"
 LOG_URL="" STARTED="" FINISHED=""
 report() { # report <state> <description>
   case "$1" in
     in_progress) STARTED=1 ;;
     *) FINISHED=1 ;;
   esac
-  [[ -n "${GIT_DEPLOY_GITHUB_TOKEN:-}" ]] || return 0
+  [[ -n "${GIT_DEPLOY_GITHUB_TOKEN:-}" && "$DEPLOYMENT_ID" != 0 ]] || return 0
   local body="{\"state\":\"$1\",\"description\":\"$2\""
   [[ -z "$LOG_URL" ]] || body+=",\"log_url\":\"$LOG_URL\""
   body+="}"
@@ -95,7 +136,7 @@ report() { # report <state> <description>
       -H "Authorization: Bearer $GIT_DEPLOY_GITHUB_TOKEN" \
       -H "Accept: application/vnd.github+json" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
-      "${GIT_DEPLOY_GITHUB_API:-https://api.github.com}/repos/$REPO/deployments/$DEPLOYMENT_ID/statuses" \
+      "$API/repos/$REPO/deployments/$DEPLOYMENT_ID/statuses" \
       -d "$body"; then
     log "couldn't report '$1' status to GitHub (continuing anyway)" >&2
   fi
@@ -112,9 +153,10 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Find the bare repo whose deploy.env opts in for this repo + environment.
-# Case-insensitive on the repo name, since GitHub is.
-for env_file in "$REPO_ROOT"/*.git/deploy.env; do
+# Webhook mode: find the bare repo whose deploy.env opts in for this repo +
+# environment. Case-insensitive on the repo name, since GitHub is. (Push
+# mode was handed its bare repo by the hook.)
+[[ "$MODE" == push ]] || for env_file in "$REPO_ROOT"/*.git/deploy.env; do
   [[ -f "$env_file" ]] || continue
   match=$(
     GITHUB_REPO="" GITHUB_ENVIRONMENT=""
@@ -152,11 +194,50 @@ flock 9
 # ids only ever increase, so this stops a replayed (captured and re-sent)
 # old delivery from rolling the app back to whatever commit it named.
 SEEN_FILE="$BARE/git-deploy-webhook.last-id"
-last_id=$(cat "$SEEN_FILE" 2> /dev/null || echo 0)
-if (( DEPLOYMENT_ID <= last_id )); then
-  die "deployment $DEPLOYMENT_ID is not newer than already-handled $last_id, ignoring (replay or redelivery?)"
+if [[ "$MODE" == webhook ]]; then
+  last_id=$(cat "$SEEN_FILE" 2> /dev/null || echo 0)
+  if (( DEPLOYMENT_ID <= last_id )); then
+    die "deployment $DEPLOYMENT_ID is not newer than already-handled $last_id, ignoring (replay or redelivery?)"
+  fi
+  echo "$DEPLOYMENT_ID" > "$SEEN_FILE"
 fi
-echo "$DEPLOYMENT_ID" > "$SEEN_FILE"
+
+# Push mode: record this push as a GitHub Deployment. Anything short of a
+# created deployment (no token, GitHub unreachable, a commit GitHub doesn't
+# have yet) just means this deploy isn't recorded — it still happens.
+if [[ "$MODE" == push ]]; then
+  if [[ -z "${GIT_DEPLOY_GITHUB_TOKEN:-}" ]]; then
+    log "no GitHub token configured, not recording this push as a deployment"
+  else
+    body="{\"ref\":\"$SHA\",\"environment\":\"$ENVIRONMENT\",\"task\":\"git-deploy-push\",\"auto_merge\":false,\"required_contexts\":[],\"description\":\"Manual git push\"}"
+    response=$(curl -sS -w '\n%{http_code}' -X POST \
+        -H "Authorization: Bearer $GIT_DEPLOY_GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "$API/repos/$REPO/deployments" -d "$body" 2>&1 || true)
+    code="${response##*$'\n'}"
+    if [[ "$code" == 201 ]]; then
+      # The deployment's own id is the first "id" in the response.
+      DEPLOYMENT_ID=$(grep -o '"id": *[0-9]*' <<< "$response" | head -1 | grep -o '[0-9]*$' || true)
+      DEPLOYMENT_ID="${DEPLOYMENT_ID:-0}"
+      # Also advance the replay guard, so a stale webhook delivery for an
+      # older deployment can't roll back what was just pushed.
+      [[ "$DEPLOYMENT_ID" == 0 ]] || echo "$DEPLOYMENT_ID" > "$SEEN_FILE"
+    else
+      # `|| true`: an unreachable GitHub gives curl's own error, no JSON — and
+      # a failed grep under set -e would abort the deploy itself.
+      message=$(grep -o '"message": *"[^"]*"' <<< "$response" | head -1 | sed 's/.*: *"//; s/"$//' || true)
+      [[ "$code" != 000 ]] || message="GitHub API unreachable"
+      [[ "$code" != 422 ]] || message="GitHub doesn't have ${SHA:0:12} (push it to GitHub first to have it recorded)"
+      log "not recording this push as a deployment: ${message:-HTTP $code}"
+    fi
+  fi
+  if [[ "$DEPLOYMENT_ID" == 0 ]]; then
+    # Nothing to report to: just deploy, exactly as the hook would have.
+    echo "$OLDREV $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DIR=. ./hooks/post-receive)
+    exit
+  fi
+fi
 
 if [[ -n "${GIT_DEPLOY_LOG_DIR:-}" && -n "${GIT_DEPLOY_LOG_BASE_URL:-}" ]]; then
   find "$GIT_DEPLOY_LOG_DIR" -maxdepth 1 -name '*.log' -mtime "+${GIT_DEPLOY_LOG_KEEP_DAYS:-30}" -delete 2> /dev/null || true
@@ -185,39 +266,50 @@ split_output() {
 log "deployment $DEPLOYMENT_ID: $REPO ($ENVIRONMENT) $SHA -> $BARE"
 report in_progress "Deploying"
 
-# Fetch GitHub's current $BRANCH and only deploy a commit that's actually on
-# it. Even if the webhook secret leaked, a forged delivery can then only
-# ever deploy code that's already on the real $BRANCH — never an arbitrary
-# commit from a fork, PR, or other branch.
-if ! git -C "$BARE" fetch --quiet --no-tags "$GITHUB_URL" "+refs/heads/$BRANCH:refs/git-deploy/github"; then
-  report error "Couldn't fetch $BRANCH from GitHub"
-  die "fetch of $BRANCH from $GITHUB_URL failed"
-fi
-if ! git -C "$BARE" merge-base --is-ancestor "$SHA" refs/git-deploy/github 2> /dev/null; then
-  report failure "$SHA is not on $BRANCH"
-  die "$SHA is not on GitHub's $BRANCH, refusing to deploy it"
+if [[ "$MODE" == push ]]; then
+  # receive-pack already moved the ref; just run the deploy.
+  current="$OLDREV"
+else
+  # Fetch GitHub's current $BRANCH and only deploy a commit that's actually on
+  # it. Even if the webhook secret leaked, a forged delivery can then only
+  # ever deploy code that's already on the real $BRANCH — never an arbitrary
+  # commit from a fork, PR, or other branch.
+  if ! git -C "$BARE" fetch --quiet --no-tags "$GITHUB_URL" "+refs/heads/$BRANCH:refs/git-deploy/github"; then
+    report error "Couldn't fetch $BRANCH from GitHub"
+    die "fetch of $BRANCH from $GITHUB_URL failed"
+  fi
+  if ! git -C "$BARE" merge-base --is-ancestor "$SHA" refs/git-deploy/github 2> /dev/null; then
+    report failure "$SHA is not on $BRANCH"
+    die "$SHA is not on GitHub's $BRANCH, refusing to deploy it"
+  fi
+
+  # Hand off to the same post-receive hook (and so this app's deploy.conf)
+  # a manual `git push deploy` runs — but by doing receive-pack's two steps
+  # ourselves (move the ref, feed the hook oldrev/newrev/ref on stdin)
+  # rather than pushing: git ignores post-receive's exit status, so a push
+  # "succeeds" even when deploy_build/deploy_restart failed, and we'd report
+  # success for a broken deploy. Running the hook directly surfaces it.
+  #
+  # The ref move is unconditional (like a forced push), because GitHub is
+  # the source of truth here: the bare repo may hold a commit pushed by hand
+  # that GitHub doesn't have, or this may intentionally be an older commit
+  # on $BRANCH. Same-commit redeploys still run the hook (a real push would
+  # be a no-op) — the button was clicked on purpose.
+  current=$(git -C "$BARE" rev-parse --verify --quiet "refs/heads/$BRANCH" || echo "$ZERO")
+  [[ "$current" != "$SHA" ]] || log "$BRANCH is already at $SHA, redeploying it"
+  git -C "$BARE" update-ref -m "git-deploy-webhook: deployment $DEPLOYMENT_ID" "refs/heads/$BRANCH" "$SHA"
 fi
 
-# Hand off to the same post-receive hook (and so this app's deploy.conf)
-# a manual `git push deploy` runs — but by doing receive-pack's two steps
-# ourselves (move the ref, feed the hook oldrev/newrev/ref on stdin)
-# rather than pushing: git ignores post-receive's exit status, so a push
-# "succeeds" even when deploy_build/deploy_restart failed, and we'd report
-# success for a broken deploy. Running the hook directly surfaces it.
-#
-# The ref move is unconditional (like a forced push), because GitHub is
-# the source of truth here: the bare repo may hold a commit pushed by hand
-# that GitHub doesn't have, or this may intentionally be an older commit
-# on $BRANCH. Same-commit redeploys still run the hook (a real push would
-# be a no-op) — the button was clicked on purpose.
-current=$(git -C "$BARE" rev-parse --verify --quiet "refs/heads/$BRANCH" || echo "$ZERO")
-[[ "$current" != "$SHA" ]] || log "$BRANCH is already at $SHA, redeploying it"
-git -C "$BARE" update-ref -m "git-deploy-webhook: deployment $DEPLOYMENT_ID" "refs/heads/$BRANCH" "$SHA"
-
-if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
+# GIT_DEPLOY_NO_GITHUB: this deploy is already being recorded, so the hook
+# mustn't hand off to push mode again.
+if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
   report success "Deployed ${SHA:0:12}"
   log "deployment $DEPLOYMENT_ID succeeded"
 else
-  report failure "Deploy failed, see the log (full output: journalctl -t git-deploy-webhook)"
+  if [[ "$MODE" == push ]]; then
+    report failure "Deploy failed, see the log (full output: the pusher's terminal)"
+  else
+    report failure "Deploy failed, see the log (full output: journalctl -t git-deploy-webhook)"
+  fi
   die "deployment $DEPLOYMENT_ID failed"
 fi

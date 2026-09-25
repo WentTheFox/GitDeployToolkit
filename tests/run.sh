@@ -229,6 +229,64 @@ section "GIT_DEPLOY_LOG_PUBLIC=full"
 GIT_DEPLOY_LOG_PUBLIC=full "$ROOT/share/git-deploy-webhook" test/app 111 "$FAIL2" production > /dev/null 2>&1 || true
 check "full mode publishes command output" grep -q TOPSECRET-OUTPUT <(public_log 111)
 
+# --- manual pushes recorded as GitHub Deployments (push mode) -----------
+
+section "manual push to an opted-in app"
+check "webhook deliveries never create deployments themselves" bash -c "! grep -q '/deployments {' '$T/statuses.txt'"
+# Push mode reads the server's env file itself; prove it by giving it the
+# settings only through that file.
+cat > push.env <<EOF
+GIT_DEPLOY_GITHUB_TOKEN=test-token
+GIT_DEPLOY_GITHUB_API=http://127.0.0.1:$API_PORT
+GIT_DEPLOY_LOG_DIR=$T/logs
+GIT_DEPLOY_LOG_BASE_URL=http://127.0.0.1:$API_PORT/logs/
+EOF
+manual_push() { # manual_push <env file> -> pusher's output
+  (cd dev && env -u GIT_DEPLOY_GITHUB_TOKEN -u GIT_DEPLOY_GITHUB_API -u GIT_DEPLOY_LOG_DIR -u GIT_DEPLOY_LOG_BASE_URL \
+    GIT_DEPLOY_ENV_FILE="$1" git push "$BARE" main 2>&1)
+}
+created() { grep '/deployments {' statuses.txt | grep -c "\"ref\":\"$1\"" || true; }
+
+PUSH1=$(commit "manual push")
+out=$(manual_push "$T/push.env")
+check "creates a deployment for the pushed commit" test "$(created "$PUSH1")" -eq 1
+check "... with task git-deploy-push (which the webhook ignores)" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"task\":\"git-deploy-push\"'"
+check "... in the app's environment" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"environment\":\"production\"'"
+check "reports in_progress then success" bash -c "grep -q '/deployments/5000/statuses .*in_progress' '$T/statuses.txt' && grep -q '/deployments/5000/statuses .*success' '$T/statuses.txt'"
+check "links a public log" grep -q "git-deploy: running deploy_restart" <(public_log 5000)
+check "pusher still sees the full output" grep -q "remote: restarted" <<< "$out"
+check "deploys exactly once (no hand-off loop)" test "$(grep -cx "$PUSH1" "$WORKTREE/.deployed")" -eq 1
+check "advances the replay guard" test "$(cat "$BARE/git-deploy-webhook.last-id")" = 5000
+
+PUSH2=$(commit "not on GitHub yet")
+echo "$PUSH2" >> statuses.txt.unknown-refs
+out=$(manual_push "$T/push.env")
+check "commit GitHub lacks -> says so" grep -q "doesn't have ${PUSH2:0:12}" <<< "$out"
+check "... and still deploys" grep -qx "$PUSH2" "$WORKTREE/.deployed"
+
+PUSH_OWNER=$(commit "owner-specific token")
+{ cat push.env; echo "GIT_DEPLOY_GITHUB_TOKEN_TEST=owner-token"; } > push-owner.env
+manual_push "$T/push-owner.env" > /dev/null
+check "owner-specific token wins over the default" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH_OWNER' | grep -q 'auth=owner-token\$'"
+
+PUSH_DOWN=$(commit "GitHub unreachable")
+sed "s#^GIT_DEPLOY_GITHUB_API=.*#GIT_DEPLOY_GITHUB_API=http://127.0.0.1:$(free_port)#" push.env > push-down.env
+out=$(manual_push "$T/push-down.env")
+check "GitHub unreachable -> says so" grep -q "GitHub API unreachable" <<< "$out"
+check "... and still deploys" grep -qx "$PUSH_DOWN" "$WORKTREE/.deployed"
+
+PUSH3=$(commit "no token")
+grep -v TOKEN push.env > push-notoken.env
+out=$(manual_push "$T/push-notoken.env")
+check "no token -> says so" grep -q "no GitHub token configured" <<< "$out"
+check "... and still deploys" grep -qx "$PUSH3" "$WORKTREE/.deployed"
+
+PUSH4=$(commit "break it manually" add)
+out=$(manual_push "$T/push.env")
+check "failing manual push -> failure status" bash -c "grep -qE '/deployments/50[0-9]{2}/statuses .*\"failure\"' '$T/statuses.txt'"
+check "... and the pusher sees the failed command" grep -q "git-deploy: failed (exit 3) in deploy_restart" <<< "$out"
+commit "unbreak" rm > /dev/null
+
 # --- deploy.yml's wait/tail step ---------------------------------------
 
 section "deploy-webhook.yml wait step"

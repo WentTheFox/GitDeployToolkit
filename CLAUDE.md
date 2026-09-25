@@ -114,6 +114,23 @@ Non-obvious decisions, don't undo without a reason:
   rest (two builds of one app on one VPS at once would just compete).
   Server side needed nothing new: `GITHUB_ENVIRONMENT` in each bare
   repo's deploy.env already routes them.
+- **Manual pushes are recorded too** (user's request): for a bare repo
+  with `GITHUB_REPO`, `post-receive` hands the push to
+  `git-deploy-webhook --push`, which creates the Deployment itself (task
+  `git-deploy-push` — the webhook trigger rule only matches
+  `git-deploy`, which is what stops a manual push from deploying twice)
+  and re-runs the hook with `GIT_DEPLOY_NO_GITHUB=1` for the actual
+  deploy; webhook mode sets the same variable, which is what stops a
+  button deploy from creating a second deployment. Both guards have a
+  test that fails without them. Recording is strictly best-effort: no
+  token, API unreachable, or a commit GitHub lacks (422) all fall back
+  to a plain deploy with a one-line note — never a skipped deploy. That
+  last property was broken once already (a `grep` for the error message
+  finding nothing aborted the script under `set -e`, so an unreachable
+  API meant *no deploy at all*) — keep the unreachable-API test.
+- Tokens are per owner: a fine-grained PAT covers one user or one org,
+  so `GIT_DEPLOY_GITHUB_TOKEN_<OWNER>` (e.g. `_MLP_VECTORCLUB`) overrides
+  the default `GIT_DEPLOY_GITHUB_TOKEN` for that owner's repos.
 - An EXIT trap reports `error` if the script dies unexpectedly after
   `in_progress` — found via a test mutation: without it, an unanticipated
   `set -e` abort left GitHub showing the deploy as running forever.
@@ -388,6 +405,41 @@ changes, it's the source of truth for the intended UX.
   removed from the local clone), but it's confusing dead weight. Treat
   checking for and cleaning this up as **part of the migration**, not an
   optional follow-up — see the checklist below.
+
+## Required for every migration: GitHub Deployments hookup
+
+Per the user, every app on the toolkit gets the GitHub side too — not
+optional, part of the migration itself (and every app migrated before
+this rule has been retrofitted). After the first real deploy through the
+toolkit works, do README's "Once per app" steps under "Triggering deploys
+from GitHub":
+
+1. `GITHUB_REPO` (and `GITHUB_ENVIRONMENT` for a second worktree) in the
+   bare repo's `deploy.env`.
+2. Repo webhook to the server's `webhook.` host, Deployments event only,
+   the server's secret. Pipe the secret from the server straight into
+   the request so it's never printed:
+   ```sh
+   ssh <host> 'sudo sed -n "s/^GIT_DEPLOY_WEBHOOK_SECRET=//p" /etc/git-deploy/webhook.env' \
+     | python3 -c 'import json,sys; print(json.dumps({"name":"web","active":True,"events":["deployment"],"config":{"url":"https://<webhook-host>/hooks/git-deploy","content_type":"json","insecure_ssl":"0","secret":sys.stdin.read().strip()}}))' \
+     | gh api repos/<owner>/<repo>/hooks --input -
+   ```
+   then confirm the ping delivery got a 200
+   (`gh api repos/<owner>/<repo>/hooks/<id>/deliveries`). Don't list a
+   repo's existing hooks unfiltered — other services' hook URLs (e.g.
+   Discord) embed their secret.
+3. `template/deploy-webhook.yml.example` as the app's
+   `.github/workflows/deploy.yml`, committed in the app's own commit
+   style (check for commitlint/conventional commits first) and pushed to
+   `origin`.
+4. The repo added to the server's token for its owner (user action: the
+   user manages tokens; ask, don't guess whether it's done), and the
+   Deployments sidebar section enabled (user action, no API for it).
+5. Verify with a real manual `git push deploy` or button run (with the
+   user's go-ahead, as always) that a Deployment appears with status and
+   log.
+
+Record it in `servers.local.yml` (`webhook_deploy:` on the app entry).
 
 ## Post-migration cleanup checklist (do this for every app, not just when asked)
 

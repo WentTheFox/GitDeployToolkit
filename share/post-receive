@@ -53,6 +53,17 @@ while read -r oldrev newrev ref; do
     continue
   fi
 
+  # An app opted in to GitHub Deployments (GITHUB_REPO in deploy.env) gets
+  # manual pushes recorded there too: git-deploy-webhook's push mode creates
+  # the Deployment, then runs this same hook again for the actual deploy
+  # with GIT_DEPLOY_NO_GITHUB set (as webhook mode does), so this only
+  # hands off once. It lives next to this hook's real (symlinked) path.
+  HANDOFF="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-webhook"
+  if [[ -z "${GIT_DEPLOY_NO_GITHUB:-}" && -n "${GITHUB_REPO:-}" && -x "$HANDOFF" ]]; then
+    "$HANDOFF" --push "$GIT_DIR" "$oldrev" "$newrev" || exit 1
+    continue
+  fi
+
   DEPLOY_START_EPOCH=$(date +%s)
   log_deploy_event "start" ""
 

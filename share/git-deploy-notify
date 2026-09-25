@@ -69,9 +69,10 @@ if [[ "$EVENT" == started ]]; then
 fi
 
 case "$EVENT" in
-  started) title="Deploying $APP to $ENVIRONMENT" color=3447003 ;;
-  success) title="Deployed $APP to $ENVIRONMENT" color=3066993 ;;
-  failed) title="Deploy of $APP to $ENVIRONMENT failed" color=15158332 ;;
+  # The outcome leads the title in words, not just the embed's color.
+  started) title="🚀 Deploy started: $APP → $ENVIRONMENT" color=3447003 ;;
+  success) title="✅ Deploy succeeded: $APP → $ENVIRONMENT" color=3066993 ;;
+  failed) title="❌ Deploy failed: $APP → $ENVIRONMENT" color=15158332 ;;
   *) echo "git-deploy-notify: unknown event $EVENT" >&2; exit 1 ;;
 esac
 

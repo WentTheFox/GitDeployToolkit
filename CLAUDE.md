@@ -258,6 +258,12 @@ changes, it's the source of truth for the intended UX.
   Deployment with status and log). Its old script's "rebuild on lockfile
   change" check could never match (`package-lock.json/`); fixed in the
   port. Post-migration cleanup fully done, removal deployed.
+- **`SpeedrunComMonitor` (first VPS) migrated 2026-09-25**, same recipe.
+  It's an hourly pm2 job (`cron_restart`, `autorestart: false`), so pm2
+  showing it "stopped" is its normal state between runs, not a crash —
+  and `pm2 restart` on deploy just runs it once (idempotent, it skips
+  already-posted runs). No build, migrations stay manual. Cleanup fully
+  done, removal deployed.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.
@@ -488,7 +494,8 @@ deploy mechanism if one existed:
    pending) for that app, so it isn't silently re-discovered later.
 
 As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`,
-`Luna`, and `DoubleColonBot` have all been fully cleaned up this way — see `servers.local.yml`
+`Luna`, `DoubleColonBot`, and `SpeedrunComMonitor` have all been fully
+cleaned up this way — see `servers.local.yml`
 for exactly what was removed on each. Run this checklist on every
 future migration.
 

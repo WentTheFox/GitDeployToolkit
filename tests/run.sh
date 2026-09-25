@@ -136,6 +136,9 @@ export GIT_DEPLOY_WEBHOOK_SECRET=test-secret GIT_DEPLOY_REPO_ROOT="$T/srv" \
   GIT_DEPLOY_LOG_DIR="$T/logs" GIT_DEPLOY_LOG_BASE_URL="http://127.0.0.1:$API_PORT/logs/" \
   GIT_DEPLOY_WEBHOOK_NO_JOURNAL=1
 "$WEBHOOK_BIN" -template -hooks hooks.json -ip 127.0.0.1 -port "$HOOK_PORT" -verbose > webhook.log 2>&1 & PIDS+=($!)
+# Wait for both servers: an early status report racing the stub API's
+# startup would otherwise fail (the script shrugs that off, the test can't).
+wait_until 10 curl -s -o /dev/null "http://127.0.0.1:$API_PORT/" || { echo "tests: stub API didn't start" >&2; exit 2; }
 wait_until 10 curl -s -o /dev/null "http://127.0.0.1:$HOOK_PORT/" || { cat webhook.log; exit 2; }
 
 send() { # send <id> <sha> [environment] [task] [secret] -> prints response body
@@ -165,6 +168,7 @@ check "deployed the requested commit" test "$(git -C "$BARE" rev-parse main)" = 
 check "deploy_build ran for it" grep -qx "$MAIN2" "$WORKTREE/.deployed"
 if grep -rq "$T" logs/; then not_ok "public log masks server paths" "$(public_log 100)"; else ok "public log masks server paths"; fi
 check "public log shows progress" grep -q "git-deploy: running deploy_restart" <(public_log 100)
+check "every public log line is timestamped" bash -c "! grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4} git-deploy' <(cat '$T'/logs/100-*.log)"
 
 send 100 "$MAIN2" > /dev/null; settle
 check "replayed id is ignored" test "$(statuses 100 | wc -l)" -eq 2

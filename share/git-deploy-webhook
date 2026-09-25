@@ -53,13 +53,15 @@ fi
 
 PUBLIC_LOG="" BARE="" WORKTREE=""
 # Append to the public log with this server's real paths masked — those
-# (like its hostname) are nobody's business outside the server.
+# (like its hostname) are nobody's business outside the server — and a
+# timestamp, since neither the raw log_url view nor GitHub's Deployments
+# page shows one. Bash's printf %()T, not `date`: no fork per line.
 public() {
   local line="$1"
   [[ -z "$WORKTREE" ]] || line="${line//"$WORKTREE"/<worktree>}"
   [[ -z "$BARE" ]] || line="${line//"$BARE"/<repo>}"
   [[ -z "$REPO_ROOT" ]] || line="${line//"$REPO_ROOT"/<repos>}"
-  echo "$line" >> "$PUBLIC_LOG"
+  printf '%(%Y-%m-%d %H:%M:%S %z)T %s\n' -1 "$line" >> "$PUBLIC_LOG"
 }
 log() {
   echo "git-deploy-webhook: $*"

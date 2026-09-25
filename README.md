@@ -177,7 +177,7 @@ different servers — each server only acts on the repos it has.
 On a public repo, deployment statuses and Actions logs are visible to
 anyone, and so is the log they link to (unguessable URL, but published in
 the status). By default that log only contains the toolkit's own
-`git-deploy...` progress lines — which step ran, and for a failure the
+`git-deploy...` progress lines, each timestamped — which step ran, and for a failure the
 failing command's source text and exit code (the shared hook prints that
 line on any failure, from its unexpanded text as committed in
 `deploy.conf`) — never command output, and with the server's paths masked.

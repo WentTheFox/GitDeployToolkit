@@ -257,7 +257,7 @@ changes, it's the source of truth for the intended UX.
   first real test of manual-push recording (worked — a `git-deploy-push`
   Deployment with status and log). Its old script's "rebuild on lockfile
   change" check could never match (`package-lock.json/`); fixed in the
-  port. Cleanup done except deploying the old script's removal.
+  port. Post-migration cleanup fully done, removal deployed.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.
@@ -487,8 +487,8 @@ deploy mechanism if one existed:
 5. Note in `servers.local.yml` that this cleanup is done (or still
    pending) for that app, so it isn't silently re-discovered later.
 
-As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`, and
-`Luna` have all been fully cleaned up this way — see `servers.local.yml`
+As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`,
+`Luna`, and `DoubleColonBot` have all been fully cleaned up this way — see `servers.local.yml`
 for exactly what was removed on each. Run this checklist on every
 future migration.
 

@@ -9,14 +9,12 @@
 #
 # Strictly best-effort: a slow or failing Discord costs at most a few
 # seconds and one line of output, never the deploy. Messages carry no
-# command output, only what ran where and how it ended (plus the log link
-# when there is one).
+# command output or log links, only what ran where and how it ended.
 #
 #   git-deploy-notify <started|success|failed> <bare-repo> <oldrev> <newrev> [duration-s]
 #
 # Environment (set by git-deploy-webhook for the deploys it runs):
 #   GIT_DEPLOY_TRIGGER   how the deploy was started, default "git push"
-#   GIT_DEPLOY_LOG_URL   the deploy's public log, linked when set
 
 set -uo pipefail
 
@@ -70,15 +68,14 @@ fi
 
 case "$EVENT" in
   # The outcome leads the title in words, not just the embed's color.
-  started) title="🚀 Deploy started: $APP → $ENVIRONMENT" color=3447003 ;;
-  success) title="✅ Deploy succeeded: $APP → $ENVIRONMENT" color=3066993 ;;
-  failed) title="❌ Deploy failed: $APP → $ENVIRONMENT" color=15158332 ;;
+  started) title="Deploy started: $APP → $ENVIRONMENT" color=3447003 ;;
+  success) title="Deploy succeeded: $APP → $ENVIRONMENT" color=3066993 ;;
+  failed) title="Deploy failed: $APP → $ENVIRONMENT" color=15158332 ;;
   *) echo "git-deploy-notify: unknown event $EVENT" >&2; exit 1 ;;
 esac
 
 fields="{\"name\":\"Trigger\",\"value\":$(json "${GIT_DEPLOY_TRIGGER:-git push}"),\"inline\":true}"
 [[ -z "$DURATION" ]] || fields+=",{\"name\":\"Duration\",\"value\":$(json "${DURATION}s"),\"inline\":true}"
-[[ -z "${GIT_DEPLOY_LOG_URL:-}" ]] || fields+=",{\"name\":\"Log\",\"value\":$(json "[view]($GIT_DEPLOY_LOG_URL)"),\"inline\":true}"
 
 # allowed_mentions: a commit subject saying @everyone must not ping anyone.
 body="{\"allowed_mentions\":{\"parse\":[]},\"embeds\":[{\"title\":$(json "$title"),\"description\":$(json "$description"),\"color\":$color,\"fields\":[$fields],\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}"

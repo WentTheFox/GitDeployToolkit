@@ -155,7 +155,7 @@ on_exit() {
     log "deployment $DEPLOYMENT_ID aborted unexpectedly (exit $rc)"
   fi
   if [[ -n "$STARTED" && -z "$HOOK_RAN" && $rc -ne 0 ]]; then
-    GIT_DEPLOY_LOG_URL="$LOG_URL" "$(dirname "$(readlink -f "$0")")/git-deploy-notify" \
+    "$(dirname "$(readlink -f "$0")")/git-deploy-notify" \
       failed "$BARE" "${current:-$ZERO}" "$SHA" || true
   fi
 }
@@ -312,10 +312,10 @@ else
 fi
 
 # GIT_DEPLOY_NO_GITHUB: this deploy is already being recorded, so the hook
-# mustn't hand off to push mode again. The other two are for its Discord
-# messages (git-deploy-notify).
+# mustn't hand off to push mode again. GIT_DEPLOY_TRIGGER is for its
+# Discord messages (git-deploy-notify).
 HOOK_RAN=1
-if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DEPLOY_TRIGGER="$TRIGGER" GIT_DEPLOY_LOG_URL="$LOG_URL" GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
+if echo "$current $SHA refs/heads/$BRANCH" | (cd "$BARE" && GIT_DEPLOY_NO_GITHUB=1 GIT_DEPLOY_TRIGGER="$TRIGGER" GIT_DIR=. ./hooks/post-receive 2>&1) | split_output; then
   report success "Deployed ${SHA:0:12}"
   log "deployment $DEPLOYMENT_ID succeeded"
 else

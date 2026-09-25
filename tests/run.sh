@@ -177,8 +177,8 @@ MAIN2=$(commit "fix restart" rm)
 dmark
 send 100 "$MAIN2" > /dev/null; final 100
 dwait 2
-check "discord: started + finished, once each" test "$(discord_titles)" = "🚀 Deploy started: App → production|✅ Deploy succeeded: App → production|"
-check "discord: names the trigger and links the log" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '.embeds[0].fields | (map(select(.value == \"Deploy button\")) | length == 1) and (map(select(.name == \"Log\" and (.value | contains(\"/logs/100-\")))) | length == 1)' > /dev/null"
+check "discord: started + finished, once each" test "$(discord_titles)" = "Deploy started: App → production|Deploy succeeded: App → production|"
+check "discord: names the trigger, no log link" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '(.embeds[0].fields | map(select(.value == \"Deploy button\")) | length == 1) and (tostring | contains(\"/logs/\") | not)' > /dev/null"
 check "discord: start message lists the new commit" bash -c "head -$((DMARK + 1)) '$T/statuses.txt.discord' | tail -1 | jq -r '.embeds[0].description' | grep -q '• fix restart'"
 check "valid delivery -> in_progress" has_state 100 in_progress
 check "valid delivery -> success" has_state 100 success
@@ -204,7 +204,7 @@ SIDE=$(git -C dev rev-parse side)
 dmark
 send 103 "$SIDE" > /dev/null; final 103
 dwait 1
-check "discord: failure before the hook ran -> one failed message" test "$(discord_titles)" = "❌ Deploy failed: App → production|"
+check "discord: failure before the hook ran -> one failed message" test "$(discord_titles)" = "Deploy failed: App → production|"
 check "commit not on main -> failure" bash -c "grep '/deployments/103/' '$T/statuses.txt' | grep -q 'is not on main'"
 check "... and nothing deployed" test "$(git -C "$BARE" rev-parse main)" = "$MAIN2"
 
@@ -215,7 +215,7 @@ FAIL2=$(commit "break restart again" add)
 dmark
 send 105 "$FAIL2" > /dev/null; final 105
 dwait 2
-check "discord: failing deploy.conf -> started + failed" test "$(discord_titles)" = "🚀 Deploy started: App → production|❌ Deploy failed: App → production|"
+check "discord: failing deploy.conf -> started + failed" test "$(discord_titles)" = "Deploy started: App → production|Deploy failed: App → production|"
 check "failing deploy.conf -> failure" has_state 105 failure
 check "public log names the failed command" grep -q "git-deploy: failed (exit 3) in deploy_restart: sh -c 'cat private-output.txt; exit 3'" <(public_log 105)
 if public_log 105 | grep -q TOPSECRET; then not_ok "public log omits command output" "$(public_log 105)"; else ok "public log omits command output"; fi
@@ -237,7 +237,7 @@ echo "DISCORD_WEBHOOK_URL=$DISCORD_URL" >> "$T/srv/app-beta.git/deploy.env"
 dmark
 send 120 "$MAIN3" beta > /dev/null; final 120
 dwait 2
-check "discord: names the environment" test "$(discord_titles)" = "🚀 Deploy started: App → beta|✅ Deploy succeeded: App → beta|"
+check "discord: names the environment" test "$(discord_titles)" = "Deploy started: App → beta|Deploy succeeded: App → beta|"
 check "environment picks the matching bare repo" test "$(git -C "$T/srv/app-beta.git" rev-parse main 2> /dev/null)" = "$MAIN3"
 check "... and deploys its own worktree" grep -qx "$MAIN3" "$T/www/app-beta/.deployed"
 check "... without touching production" test "$(git -C "$BARE" rev-parse main)" = "$PROD_BEFORE"
@@ -257,7 +257,7 @@ send 110 "$MAIN3" > /dev/null; final 110
 chmod u+w "$BARE/refs/heads"
 dwait 1
 check "unexpected abort -> error status" has_state 110 error
-check "discord: unexpected abort -> one failed message" test "$(discord_titles)" = "❌ Deploy failed: App → production|"
+check "discord: unexpected abort -> one failed message" test "$(discord_titles)" = "Deploy failed: App → production|"
 
 section "GIT_DEPLOY_LOG_PUBLIC=full"
 GIT_DEPLOY_LOG_PUBLIC=full "$ROOT/share/git-deploy-webhook" test/app 111 "$FAIL2" production > /dev/null 2>&1 || true
@@ -285,8 +285,8 @@ PUSH1=$(commit "manual push")
 dmark
 out=$(manual_push "$T/push.env")
 echo "$out" >> all-push-output.txt
-check "discord: started + finished, once each (no double via hand-off)" test "$(discord_titles)" = "🚀 Deploy started: App → production|✅ Deploy succeeded: App → production|"
-check "discord: trigger is git push, log linked" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '.embeds[0].fields | (map(select(.value == \"git push\")) | length == 1) and (map(select(.name == \"Log\")) | length == 1)' > /dev/null"
+check "discord: started + finished, once each (no double via hand-off)" test "$(discord_titles)" = "Deploy started: App → production|Deploy succeeded: App → production|"
+check "discord: trigger is git push, no log link" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '(.embeds[0].fields | map(select(.value == \"git push\")) | length == 1) and (tostring | contains(\"/logs/\") | not)' > /dev/null"
 check "creates a deployment for the pushed commit" test "$(created "$PUSH1")" -eq 1
 check "... with task git-deploy-push (which the webhook ignores)" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"task\":\"git-deploy-push\"'"
 check "... in the app's environment" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"environment\":\"production\"'"
@@ -318,7 +318,7 @@ grep -v TOKEN push.env > push-notoken.env
 dmark
 out=$(manual_push "$T/push-notoken.env")
 echo "$out" >> all-push-output.txt
-check "discord: unrecorded push still announced once" test "$(discord_titles)" = "🚀 Deploy started: App → production|✅ Deploy succeeded: App → production|"
+check "discord: unrecorded push still announced once" test "$(discord_titles)" = "Deploy started: App → production|Deploy succeeded: App → production|"
 check "no token -> says so" grep -q "no GitHub token configured" <<< "$out"
 check "... and still deploys" grep -qx "$PUSH3" "$WORKTREE/.deployed"
 
@@ -343,7 +343,7 @@ chmod a-w "$WORKTREE"
 dmark
 out=$(manual_push "$T/push.env"); echo "$out" >> all-push-output.txt
 chmod u+w "$WORKTREE"
-check "discord: hook aborting mid-deploy -> started + failed" test "$(discord_titles)" = "🚀 Deploy started: App → production|❌ Deploy failed: App → production|"
+check "discord: hook aborting mid-deploy -> started + failed" test "$(discord_titles)" = "Deploy started: App → production|Deploy failed: App → production|"
 
 touch statuses.txt.discord-fail
 DOWN1=$(commit "discord returns 500")

@@ -352,7 +352,8 @@ and every deploy of it posts two messages there: one when it starts (the
 commit range and the new commits' subjects) and one with the outcome and
 duration. Each title leads with its outcome in words — "Deploy started",
 "Deploy succeeded", "Deploy failed" — not just the embed's color. Both say how it was started ("git push" or
-"Deploy button") and link the public log when there is one. Button deploys,
+"Deploy button"). There's no log link; GitHub's Deployments page and the
+Actions run have that. Button deploys,
 manual pushes and plain pushes of apps without GitHub all notify exactly
 once — the shared hook sends them (via `git-deploy-notify`), and a button
 deploy that fails before the hook even runs (commit not on the branch)

@@ -62,6 +62,59 @@ subsection for the security considerations (this repo being public is
 the one that matters most: never let anything but `workflow_dispatch`
 target the `git-deploy` label).
 
+## Optional: GitHub deployment webhook (supersedes the runner trigger above)
+
+The user asked for a way to deploy from GitHub **without** self-hosted
+runners (discouraged on public repos). Chosen design, drafted 2026-09-25:
+`template/deploy-webhook.yml.example` (copied per app as
+`.github/workflows/deploy.yml`) runs on a **GitHub-hosted** runner and
+only creates a GitHub Deployment (task `git-deploy`) with the built-in
+`GITHUB_TOKEN`. GitHub delivers a signed `deployment` webhook to one
+listener per server (adnanh/webhook, Debian package `webhook`, config
+`share/webhook-hooks.json`, unit `share/git-deploy-webhook@.service`
+instanced by deploy user) behind an nginx vhost named
+`webhook.<server's domain>` (real names in `servers.local.yml`, never in
+tracked files). `share/git-deploy-webhook` maps repo+environment to a
+bare repo via new optional `deploy.env` keys (`GITHUB_REPO`,
+`GITHUB_ENVIRONMENT`, `GITHUB_URL`), fetches the branch from GitHub,
+refuses any SHA not reachable from it, and then does receive-pack's job
+itself (`update-ref` + feed the shared `post-receive` on stdin). Still
+`workflow_dispatch`-only — same "never auto-deploy" rule as before.
+
+Non-obvious decisions, don't undo without a reason:
+- **It doesn't `git push` into the bare repo**, because git ignores
+  `post-receive`'s exit status: a push "succeeds" even when
+  `deploy_build`/`deploy_restart` failed (verified in the local test).
+  Running the hook directly is the only way to report failure honestly.
+  (Same is true of a manual `git push deploy` — its exit code has never
+  meant the deploy worked.)
+- **Public log = summary only, by the user's request**: on public repos
+  deployment statuses/`log_url`/Actions logs are world-readable, so the
+  served per-deploy log only gets `git-deploy...`-prefixed lines, with
+  server paths masked and no hostname in status descriptions. Full output
+  goes to the journal (`journalctl -t git-deploy-webhook`).
+  `GIT_DEPLOY_LOG_PUBLIC=full` opts out.
+- To make failures useful in that summary, `share/post-receive` now has
+  an ERR trap (`set -E`) printing `git-deploy: failed (exit N) in <fn>:
+  <$BASH_COMMAND>` — unexpanded source text, so no variable values. It
+  only fires at the deploy subshell's own `$BASH_SUBSHELL` level, because
+  with `-E` it would otherwise also fire for failures inside a `$(...)`
+  that the caller tolerates and print a false "failed" on a good deploy.
+- Replay guard: per-bare-repo `git-deploy-webhook.last-id`, deployments
+  not newer than it are ignored (ids are monotonic). `flock` serializes
+  deploys per app.
+- Status reporting needs a fine-grained PAT (Deployments RW only) on the
+  server in `/etc/git-deploy/webhook.env`; without it the Actions run
+  fails after 60s with "server never acknowledged".
+
+Status: drafted and tested locally only (real `webhook` 2.8.0 binary,
+signed deliveries, stub statuses API, range-request log tailing). **Not
+yet installed on either VPS, no app opted in yet.**
+
+Testing note: this checkout has `core.autocrlf=true` (user's global
+config), so working-copy scripts are CRLF and won't run as-is — copy
+them to the scratchpad and strip `\r` before a local test.
+
 ## Architecture
 
 ```
@@ -96,6 +149,9 @@ the server check when an app was last deployed without asking. Errors
 from `deploy_build`/`deploy_restart` are caught (not left to `set -e`
 kill the hook outright) specifically so the `complete` line still gets
 written before the hook exits non-zero.
+
+Deploys can also arrive via `share/git-deploy-webhook` (see the webhook
+section above), which runs this same hook directly instead of pushing.
 
 `bin/git-deploy-new <app> [worktree] [branch]`: one-time per-app,
 per-server setup — creates the bare repo, worktree dir, `deploy.env`,

@@ -1,0 +1,39 @@
+[
+  {
+    "id": "git-deploy",
+    "execute-command": "/usr/local/lib/git-deploy/git-deploy-webhook",
+    "command-working-directory": "/",
+    "pass-arguments-to-command": [
+      { "source": "payload", "name": "repository.full_name" },
+      { "source": "payload", "name": "deployment.id" },
+      { "source": "payload", "name": "deployment.sha" },
+      { "source": "payload", "name": "deployment.environment" }
+    ],
+    "response-message": "Deployment accepted, see the Deployments page for its status.\n",
+    "trigger-rule": {
+      "and": [
+        {
+          "match": {
+            "type": "payload-hmac-sha256",
+            "secret": "{{ getenv "GIT_DEPLOY_WEBHOOK_SECRET" }}",
+            "parameter": { "source": "header", "name": "X-Hub-Signature-256" }
+          }
+        },
+        {
+          "match": {
+            "type": "value",
+            "value": "deployment",
+            "parameter": { "source": "header", "name": "X-GitHub-Event" }
+          }
+        },
+        {
+          "match": {
+            "type": "value",
+            "value": "git-deploy",
+            "parameter": { "source": "payload", "name": "deployment.task" }
+          }
+        }
+      ]
+    }
+  }
+]

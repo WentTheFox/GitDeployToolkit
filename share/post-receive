@@ -72,6 +72,17 @@ while read -r oldrev newrev ref; do
     (
       set -e
       cd "$WORKTREE"
+      # Name the command that failed before set -e aborts, so a failed
+      # deploy says more than "hook exited 1". $BASH_COMMAND is the
+      # unexpanded source text (same as what's committed in deploy.conf),
+      # so no variable values end up in the log. git-deploy-webhook relies
+      # on this line to report failures without publishing full output.
+      # -E so it fires inside deploy_build/deploy_restart too; the subshell
+      # level check skips failures inside a $(...) that the caller
+      # tolerates (it still fires for the command that actually aborts).
+      set -E
+      _git_deploy_level=$BASH_SUBSHELL
+      trap '_git_deploy_rc=$?; if [[ $BASH_SUBSHELL == "$_git_deploy_level" ]]; then echo "git-deploy: failed (exit $_git_deploy_rc) in ${FUNCNAME[0]:-deploy.conf}: $BASH_COMMAND" >&2; fi' ERR
       # shellcheck source=/dev/null
       source "$APP_CONF"
 
@@ -96,10 +107,10 @@ while read -r oldrev newrev ref; do
   DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
   log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION"
 
-  echo "git-deploy: deployed $newrev to $WORKTREE"
-
   if [[ "$DEPLOY_STATUS" == "failed" ]]; then
     echo "git-deploy: deploy_build/deploy_restart failed for $WORKTREE — see $DEPLOY_LOG" >&2
     exit 1
   fi
+
+  echo "git-deploy: deployed $newrev to $WORKTREE"
 done

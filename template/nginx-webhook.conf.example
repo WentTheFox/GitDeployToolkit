@@ -1,0 +1,60 @@
+# nginx site for the git-deploy-webhook listener, one per server, e.g. at
+# /etc/nginx/sites-available/webhook.example.com.conf (symlinked into
+# sites-enabled). Every app on the server shares it: GitHub posts to
+# https://webhook.example.com/hooks/git-deploy for all of them, and the
+# listener picks the app from the payload.
+#
+# Adjust server_name, the TLS lines (reuse whatever cert setup the
+# server's other sites use — a Cloudflare origin cert snippet, or add this
+# name to an existing certbot cert with --expand), and the port /
+# log directory to match /etc/git-deploy/webhook.env.
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name webhook.example.com;
+
+    # ssl_certificate ...;
+    # ssl_certificate_key ...;
+    # include snippets/ssl-params.conf;
+
+    access_log /var/log/nginx/webhook.example.com-access.log;
+    error_log /var/log/nginx/webhook.example.com-error.log;
+
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    # The only thing GitHub needs. Everything else 404s.
+    location = /hooks/git-deploy {
+        limit_except POST { deny all; }
+        client_max_body_size 1m;
+        proxy_pass http://127.0.0.1:9321;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Per-deploy logs, linked from deployment statuses and tailed by
+    # deploy.yml with Range requests. Names are unguessable, no listing.
+    location /logs/ {
+        alias /var/lib/git-deploy/logs/;
+        autoindex off;
+        default_type text/plain;
+        charset utf-8;
+        # Never let a CDN in front of this cache a log that's still growing.
+        add_header Cache-Control "no-store" always;
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        location ~ /\. { deny all; }
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name webhook.example.com;
+    return 301 https://$host$request_uri;
+}

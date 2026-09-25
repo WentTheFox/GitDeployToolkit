@@ -81,7 +81,119 @@ signals the running process to reload itself. `deploy_build`/
 `deploy_restart` can see `$oldrev`/`$newrev`/`$GIT_DIR` to make that
 call.
 
-## Triggering deploys from GitHub Actions (optional)
+## Triggering deploys from GitHub (optional, recommended)
+
+A "Deploy" button in each app's GitHub Actions tab that ends in exactly
+the same post-receive hook + `deploy.conf` as `git push deploy main` —
+without a self-hosted runner (GitHub discourages those on public repos)
+and without any server credential stored in GitHub:
+
+```
+Actions "Deploy" button (GitHub-hosted runner, only holds GITHUB_TOKEN)
+  -> creates a GitHub Deployment (task "git-deploy") for that commit
+  -> GitHub POSTs a signed `deployment` webhook to https://webhook.example.com/hooks/git-deploy
+  -> nginx -> webhook daemon (checks HMAC signature, event, task)
+  -> git-deploy-webhook: picks the app by deploy.env, fetches the commit from
+     GitHub, refuses it unless it's on the deploy branch, moves the bare
+     repo's branch and runs the same post-receive hook
+  -> reports in_progress/success/failure back as deployment statuses; the
+     Actions run tails the linked log and goes red if the deploy failed
+```
+
+One listener per server serves every app on it. It uses
+[adnanh/webhook](https://github.com/adnanh/webhook) (packaged in Debian
+as `webhook`) plus `share/git-deploy-webhook`.
+
+### Once per server
+
+1. `sudo apt install webhook`, then update the toolkit (`git pull &&
+   sudo ./install.sh`) — this installs `git-deploy-webhook`, its
+   `hooks.json`, and the `git-deploy-webhook@.service` template unit.
+   (Debian's own `webhook.service` stays inactive without an
+   `/etc/webhook.conf`; leave it that way.)
+2. Log directory, writable by the deploy user and readable by nginx:
+   `sudo install -d -o <deploy-user> -g www-data -m 2750 /var/lib/git-deploy/logs`
+3. Config: `sudo install -d /etc/git-deploy`, copy
+   `template/webhook.env.example` to `/etc/git-deploy/webhook.env`,
+   `sudo chown root:<deploy-user>` and `chmod 640` it, and fill in:
+   - `GIT_DEPLOY_WEBHOOK_SECRET` — `openssl rand -hex 32`. One per
+     server, pasted into every app's repo webhook below.
+   - `GIT_DEPLOY_GITHUB_TOKEN` — a fine-grained personal access token,
+     repository access limited to the apps deployed from this server,
+     permission **Deployments: Read and write** and nothing else. Without
+     it deploys still run, but GitHub never hears the result. Note its
+     expiry date somewhere; an expired token looks like "the server never
+     acknowledged" in the Actions run.
+   - `GIT_DEPLOY_LOG_BASE_URL` — `https://webhook.example.com/logs`.
+4. nginx: adapt `template/nginx-webhook.conf.example` (server name, the
+   server's usual TLS setup — Cloudflare origin cert snippet or
+   `certbot --expand`), enable it, `nginx -t && systemctl reload nginx`.
+5. `sudo systemctl enable --now git-deploy-webhook@<deploy-user>` — the
+   instance name is the user that owns the bare repos (the one you `git
+   push deploy` as). Sanity check:
+   `curl -s -XPOST https://webhook.example.com/hooks/git-deploy` should
+   answer "Hook rules were not satisfied."
+
+### Once per app
+
+1. On the server, add to the app's `/srv/git/<app>.git/deploy.env`:
+   ```sh
+   GITHUB_REPO=Owner/repo
+   #GITHUB_ENVIRONMENT=beta   # only for a second worktree of the same repo; default production
+   #GITHUB_URL=git@...        # only for a private repo (defaults to https://github.com/$GITHUB_REPO.git)
+   ```
+2. In the app's GitHub repo, Settings -> Webhooks -> Add webhook:
+   payload URL `https://webhook.example.com/hooks/git-deploy`, content
+   type **application/json**, the server's secret, "Let me select
+   individual events" -> **Deployments** only.
+3. Copy `template/deploy-webhook.yml.example` to
+   `.github/workflows/deploy.yml` and commit it. (If the app had the
+   self-hosted-runner workflow below, this replaces it — remove that
+   runner and its `DEPLOY_REMOTE_URL` secret.)
+4. Add the repo to the server's token's repository list.
+
+Then: Actions tab -> "Deploy" -> Run workflow -> type `deploy`.
+
+### What ends up public
+
+On a public repo, deployment statuses and Actions logs are visible to
+anyone, and so is the log they link to (unguessable URL, but published in
+the status). By default that log only contains the toolkit's own
+`git-deploy...` progress lines — which step ran, and for a failure the
+failing command's source text and exit code (the shared hook prints that
+line on any failure, from its unexpanded text as committed in
+`deploy.conf`) — never command output, and with the server's paths masked.
+Full output always goes to the server's journal:
+`journalctl -t git-deploy-webhook`. `GIT_DEPLOY_LOG_PUBLIC=full` in
+`webhook.env` publishes everything instead. A guarded, tolerated failure
+(`if ! cmd; then ...`) prints nothing publicly; a `deploy.conf` that wants
+a message in the public log can prefix it with `git-deploy:`.
+
+### Why this is safe to expose
+
+- The webhook secret is the only credential involved, and it only lets
+  someone *trigger* a deploy. `git-deploy-webhook` independently fetches
+  the deploy branch from GitHub and refuses any commit not on it, so even
+  a leaked secret can't deploy code from a fork, PR, or other branch —
+  at worst a commit already on `main` (possibly an older one).
+- Deployment ids only increase; each app remembers the last one handled
+  and ignores anything not newer, so a captured delivery can't be
+  replayed to roll the app back.
+- Deploys of one app are serialized (`flock`), so double clicks or a
+  GitHub redelivery queue up instead of racing `checkout -f`.
+- Anyone with write access to the repo can create a deployment and so
+  deploy — the same trust boundary as the button itself.
+- The listener runs as the deploy user, with the same (narrow) sudo a
+  manual push already needs, and binds to 127.0.0.1 only.
+- If Cloudflare sits in front and ever starts challenging GitHub's
+  requests (Bot Fight Mode, WAF), Recent Deliveries shows non-2xx
+  responses; add a skip rule for `/hooks/git-deploy`.
+
+## Triggering deploys from GitHub Actions via a self-hosted runner (alternative)
+
+Superseded by the webhook approach above for public repos; kept for
+reference and for any app already set up this way.
+
 
 Deploy is always just `git push deploy main` — this only changes *who*
 runs that push, from your own machine to a button in GitHub's Actions

@@ -1,0 +1,31 @@
+# Listens for GitHub `deployment` webhooks and hands them to
+# git-deploy-webhook (see share/webhook-hooks.json). Installed by
+# install.sh; not enabled until you do so explicitly. The instance name is
+# the OS user that owns this server's bare repos and pushes to them, i.e.
+# the same deploy user you'd `git push deploy` as:
+#
+#   systemctl enable --now git-deploy-webhook@<deploy-user>
+#
+# Secret/token/port live in /etc/git-deploy/webhook.env (see README.md's
+# "Triggering deploys from GitHub" section).
+
+[Unit]
+Description=git-deploy-toolkit GitHub deployment webhook (as %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=%i
+Group=%i
+EnvironmentFile=/etc/git-deploy/webhook.env
+# An empty secret would make HMAC verification accept signatures anyone
+# can compute — refuse to start rather than run wide open.
+ExecStartPre=/bin/sh -c 'test -n "$GIT_DEPLOY_WEBHOOK_SECRET" || { echo "GIT_DEPLOY_WEBHOOK_SECRET is empty in /etc/git-deploy/webhook.env" >&2; exit 1; }'
+ExecStart=/usr/bin/webhook -template -hooks /usr/local/lib/git-deploy/hooks.json -ip 127.0.0.1 -port ${GIT_DEPLOY_WEBHOOK_PORT} -x-request-id
+Restart=on-failure
+# Deliberately no NoNewPrivileges=/sandboxing: deploy_restart commonly
+# needs its narrowly-scoped sudo rule (README "sudo for restarts"), same as
+# a manual push does.
+
+[Install]
+WantedBy=multi-user.target

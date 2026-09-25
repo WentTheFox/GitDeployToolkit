@@ -151,6 +151,11 @@ as `webhook`) plus `share/git-deploy-webhook`.
    self-hosted-runner workflow below, this replaces it — remove that
    runner and its `DEPLOY_REMOTE_URL` secret.)
 4. Add the repo to the server's token's repository list.
+5. On the repo's main page, click the gear next to "About" and tick
+   **Deployments** under "Include in the home page". Deploys work without
+   it, but that's what puts the environments (with each one's latest
+   status and log link) in the repo's sidebar; otherwise they're only
+   reachable through the Actions run.
 
 Then: Actions tab -> "Deploy" -> Run workflow.
 

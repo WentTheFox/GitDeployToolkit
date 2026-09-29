@@ -283,6 +283,17 @@ changes, it's the source of truth for the intended UX.
   and `pm2 restart` on deploy just runs it once (idempotent, it skips
   already-posted runs). No build, migrations stay manual. Cleanup fully
   done, removal deployed.
+- **`Muffins`, `Winterchilla` and a third Laravel app (first VPS)
+  migrated 2026-09-29**, which leaves every app on that VPS either on
+  the toolkit or explicitly marked skip in `servers.local.yml`. The
+  Laravel one's GitHub owner is a separate account the user doesn't
+  want named anywhere in this repo — check `servers.local.yml`, and
+  never write that name into a tracked file or commit. That owner's repos use an
+  alias webhook host and a per-owner log URL
+  (`GIT_DEPLOY_LOG_BASE_URL_<OWNER>`), and its GitHub hookup was
+  pending user action (webhook + token) at the time of writing.
+  Winterchilla deployed clean. Muffins' deploys fail in `tsc`: see
+  the pitfall below, still pending one server-side file edit.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.
@@ -395,6 +406,25 @@ changes, it's the source of truth for the intended UX.
   the restart. Don't assume porting an old script's commands verbatim
   into `deploy_build` preserves its failure behavior; audit each
   command for whether the old script would have tolerated it failing.
+- **A build tool that exits non-zero but still produces its output was
+  invisible under the old hooks.** Muffins' old script (no `set -e`) had
+  been running `tsc` that exited 2 on every deploy since a May dependency bump
+  (TypeScript 6 deprecations, stricter `@types/pg` callback types) —
+  `tsc` still emits `build/` despite type errors, so the app kept
+  working and nobody noticed. Under the toolkit the same deploy is
+  honestly reported as failed. The process itself was never touched:
+  `set -e` stops before `deploy_restart`, and the emitted output was
+  equivalent to what was already running. Fix the type errors (not
+  tolerate the exit code in `deploy.conf`). One of them lived in an
+  **untracked** server-side config file (`src/config.ts`, a stale type
+  import from before a rename). A local `tsc` with the tracked
+  example config can't catch that, so run `npx tsc --noEmit` in the
+  server worktree itself before assuming the repo-side fix is enough.
+- **`git-deploy-new` used to `chown -R` an already-existing worktree**
+  to `$SUDO_USER`. Harmless on the first migrations only by luck. On
+  apps with www-data-owned `storage/`/`fs/`/`node_modules` it would
+  have broken the live site. Fixed 2026-09-29: an existing worktree is
+  left alone.
 - **`deploy_build`/`deploy_restart` run as the deploy user (e.g. the git
   user pushing over SSH), not the web server user — files they create
   or regenerate (Laravel's `storage/`, `bootstrap/cache/`, framework
@@ -513,7 +543,8 @@ deploy mechanism if one existed:
    pending) for that app, so it isn't silently re-discovered later.
 
 As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`,
-`Luna`, `DoubleColonBot`, and `SpeedrunComMonitor` have all been fully
+`Luna`, `DoubleColonBot`, `SpeedrunComMonitor`, `Muffins`,
+`Winterchilla` and the third app above have all been fully
 cleaned up this way — see `servers.local.yml`
 for exactly what was removed on each. Run this checklist on every
 future migration.

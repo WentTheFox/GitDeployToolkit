@@ -292,8 +292,9 @@ changes, it's the source of truth for the intended UX.
   alias webhook host and a per-owner log URL
   (`GIT_DEPLOY_LOG_BASE_URL_<OWNER>`), and its GitHub hookup was
   pending user action (webhook + token) at the time of writing.
-  Winterchilla deployed clean. Muffins' deploys fail in `tsc`: see
-  the pitfall below, still pending one server-side file edit.
+  Winterchilla deployed clean. Muffins needed the `tsc` fixes in the
+  pitfall below (repo side plus its untracked server config) and then
+  deployed clean via its first Deploy-button run.
 - The Raspberry Pi target: not attempted — per `servers.local.yml`, no
   app there obviously matches the `/var/www` or `/var/node` convention,
   needs investigation before migrating anything.
@@ -417,7 +418,8 @@ changes, it's the source of truth for the intended UX.
   equivalent to what was already running. Fix the type errors (not
   tolerate the exit code in `deploy.conf`). One of them lived in an
   **untracked** server-side config file (`src/config.ts`, a stale type
-  import from before a rename). A local `tsc` with the tracked
+  import from before a rename, which in turn had been hiding dead
+  config keys from the type checker). A local `tsc` with the tracked
   example config can't catch that, so run `npx tsc --noEmit` in the
   server worktree itself before assuming the repo-side fix is enough.
 - **`git-deploy-new` used to `chown -R` an already-existing worktree**

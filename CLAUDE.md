@@ -131,6 +131,11 @@ Non-obvious decisions, don't undo without a reason:
 - Tokens are per owner: a fine-grained PAT covers one user or one org,
   so `GIT_DEPLOY_GITHUB_TOKEN_<OWNER>` (e.g. `_MLP_VECTORCLUB`) overrides
   the default `GIT_DEPLOY_GITHUB_TOKEN` for that owner's repos.
+  `GIT_DEPLOY_LOG_BASE_URL_<OWNER>` does the same for the public log
+  URL (user's request, 2026-09-29): one owner's repos use an alias
+  webhook host so their public deployment statuses don't link the
+  server's main domain. Which owner/host is in `servers.local.yml`
+  only — per the user, that owner's name never goes in this repo.
 - An EXIT trap reports `error` if the script dies unexpectedly after
   `in_progress` — found via a test mutation: without it, an unanticipated
   `set -e` abort left GitHub showing the deploy as running forever.

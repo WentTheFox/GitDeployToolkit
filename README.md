@@ -129,6 +129,11 @@ as `webhook`) plus `share/git-deploy-webhook`.
      `_`, e.g. `GIT_DEPLOY_GITHUB_TOKEN_MLP_VECTORCLUB`); it takes
      precedence for that owner's repos.
    - `GIT_DEPLOY_LOG_BASE_URL` — `https://webhook.example.com/logs`.
+     Like the token, it can be overridden per owner with
+     `GIT_DEPLOY_LOG_BASE_URL_<OWNER>`, for an owner whose repos point
+     their webhook at an alias host of their own (a second nginx
+     `server_name` in front of the same listener) and shouldn't link the
+     main host from their public deployment statuses.
 4. nginx: adapt `template/nginx-webhook.conf.example` (server name, the
    server's usual TLS setup — Cloudflare origin cert snippet or
    `certbot --expand`), enable it, `nginx -t && systemctl reload nginx`.

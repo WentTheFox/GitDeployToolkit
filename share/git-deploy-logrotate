@@ -3,7 +3,8 @@
 shared post-receive hook. See docs/logrotate.md.
 
   git-deploy-logrotate install <app> <worktree>  < deploy.logrotate
-  git-deploy-logrotate report  <app> <worktree>  < deploy.logrotate
+  git-deploy-logrotate report  <app> <worktree>  < deploy.logrotate  (no root needed;
+                                                    prints each log's retention)
   git-deploy-logrotate remove  <app>
   git-deploy-logrotate adopt   <file-in-logrotate.d>
 
@@ -16,14 +17,15 @@ rotation itself never runs as root, must set a retention (`rotate`), and
 may only touch paths inside the app's worktree. It never rotates anything:
 validation is `logrotate -d`, and the system's logrotate timer does the rest.
 
-stdout: one word, installed | unchanged | refused | ok (report).
+stdout: one word, installed | unchanged | refused (report: a JSON list of
+{path, days} instead, path relative to the worktree).
 stderr: human-readable reasons. Exit 0 unless refused (1) or misused (2).
 
 Test/override knobs (ignored by sudo's env_reset in production):
   LOGROTATE_D, LOGROTATE_BIN, GIT_DEPLOY_LOGROTATE_ROOTS (colon list),
   GIT_DEPLOY_LOGROTATE_BACKUP.
 """
-import os, pwd, re, shlex, shutil, subprocess, sys, tempfile
+import json, os, pwd, re, shlex, shutil, subprocess, sys, tempfile
 
 LOGROTATE_D = os.environ.get("LOGROTATE_D", "/etc/logrotate.d")
 LOGROTATE_BIN = os.environ.get("LOGROTATE_BIN", "logrotate")
@@ -211,13 +213,18 @@ def cmd_report_or_install(mode, app, worktree):
     worktree = check_worktree(worktree)
     text = sys.stdin.read()
     stanzas = [check_stanza(s, worktree) for s in parse(text, app, worktree)]
-    for st in stanzas:
-        days = retention_days(st)
-        keep = "%g days" % days if days is not None else "unknown (size-based)"
-        for p in st["paths"]:
-            say("retention %s: %s" % (keep, p))
     if mode == "report":
-        print("ok")
+        # One line per log file, worktree path included: the caller's public
+        # log masks it like any other server path. stdout is the same data
+        # as JSON, recorded in deploy.jsonl.
+        rows = []
+        for st in stanzas:
+            days = retention_days(st)
+            keep = "%g days" % days if days is not None else "unknown (size-based)"
+            for p in st["paths"]:
+                say("retention %s: %s" % (keep, p))
+                rows.append({"path": os.path.relpath(p, worktree), "days": days})
+        print(json.dumps(rows, separators=(",", ":")))
         return
     name = "git-deploy-%s" % app
     target = os.path.join(LOGROTATE_D, name)

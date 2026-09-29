@@ -288,7 +288,7 @@ worktree, missing `rotate`, missing non-root `su`. It validates with
 `logrotate -d` and never rotates. **Warn-only by the user's decision**: a
 refused/uninstallable file never fails a deploy; it is recorded as
 `"logrotate":...` in `deploy.jsonl`. Opt-in, gradual: no file = untouched;
-hand-made files in `/etc/logrotate.d` are never overwritten (`adopt`
+every deploy prints each log's retention (`git-deploy: logrotate: retention N days: <path>`, publicly visible with the worktree masked) and records it in `deploy.jsonl` as `retention`, even when the install is unavailable; hand-made files in `/etc/logrotate.d` are never overwritten (`adopt`
 moves them aside). pm2 logs are in scope via per-app `out_file`/`error_file`
 inside the worktree. Tested in `tests/run.sh` (mutation-checked).
 The per-server inventory of existing logrotate setups and every log file

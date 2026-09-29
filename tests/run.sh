@@ -150,7 +150,10 @@ if [[ -z "$HAVE_LR" ]]; then
 else
   check "installs a valid definition" test "$(good_def | lr install lrapp "$LRW")" = installed
   check "installed file is marked and expanded" bash -c "head -1 '$LRD/git-deploy-lrapp' | grep -q '^# managed by git-deploy' && grep -q '^$LRW/logs/\\*.log {' '$LRD/git-deploy-lrapp'"
-  check "reports retention in days" grep -q "retention 14 days" lr.err
+  rep=$(good_def | lr report lrapp "$LRW")
+  check "report prints each log's retention" grep -q "retention 14 days: $LRW/logs/\*.log" lr.err
+  check "report gives JSON with a relative path" test "$rep" = '[{"path":"logs/*.log","days":14}]'
+  check "report installs nothing" test ! -e "$LRD/git-deploy-lrapp.new"
   check "same definition again -> unchanged" test "$(good_def | lr install lrapp "$LRW")" = unchanged
   check "nothing was rotated" test -z "$(ls "$LRW/logs")"
   rm -f "$LRD/git-deploy-lrapp"
@@ -215,6 +218,8 @@ $(good_def)" "outside the worktree"
   commit "with logrotate" > /dev/null
   out=$(cd dev && git push "$BARE" main 2>&1)
   check "hook installs the app's definition" test -f "$LRD/git-deploy-app"
+  check "deploy output states each log's retention" grep -q "git-deploy: logrotate: retention 14 days: $WORKTREE/\*.log" <<< "$out"
+  check "deploy.jsonl records the retention per file" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"retention\":\\[{\"path\":\"\\*.log\",\"days\":14}\\]'"
   check "deploy.jsonl records logrotate=installed" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"installed\"'"
   check "deploy still succeeded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
   printf 'postrotate\n' > "$WORKTREE/deploy.logrotate"
@@ -223,17 +228,27 @@ $(good_def)" "outside the worktree"
   out=$(cd dev && git push "$BARE" main 2>&1)
   check "refused definition only warns" grep -q "deploy.logrotate not installed (refused)" <<< "$out"
   check "refused definition doesn't fail the deploy" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+  check "refused definition records no retention" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"retention\":\\[\\]'"
   check "refusal is recorded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"refused\"'"
   check "nothing installed on refusal" test -z "$(ls "$LRD")"
   rm -f "$WORKTREE/deploy.logrotate"
   commit "no logrotate" > /dev/null
   out=$(cd dev && git push "$BARE" main 2>&1)
+  check "no deploy.logrotate -> says so in the output" grep -q "logrotate: no deploy.logrotate" <<< "$out"
   check "no deploy.logrotate -> absent, nothing installed" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"absent\"' && test -z \"\$(ls '$LRD')\""
+  # sudo unusable: not installed, but the retention is still checked and logged
+  good_def | sed "s#@WORKTREE@/logs#@WORKTREE@#" > "$WORKTREE/deploy.logrotate"
+  rm -f "$LRD"/git-deploy-*
+  commit "no sudo" > /dev/null
+  out=$(cd dev && GIT_DEPLOY_LOGROTATE_SUDO=/nonexistent-sudo git push "$BARE" main 2>&1)
+  check "no usable sudo -> unavailable, deploy goes on" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"unavailable\"' && test -z \"\$(ls '$LRD')\""
+  check "no usable sudo -> retention still reported" grep -q "retention 14 days" <<< "$out"
+  check "no usable sudo -> retention still in deploy.jsonl" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"days\":14'"
+  # leave a valid untracked definition (and the env) in place: the webhook
+  # deliveries below check it reaches the public log with the path masked
   commit "break restart again" add > /dev/null
   (cd dev && git push -q "$BARE" main > /dev/null 2>&1) || true
-  unset GIT_DEPLOY_LOGROTATE_SUDO GIT_DEPLOY_LOGROTATE_ROOTS
 fi
-unset LOGROTATE_D GIT_DEPLOY_LOGROTATE_ROOTS GIT_DEPLOY_LOGROTATE_BACKUP
 
 # --- webhook ------------------------------------------------------------
 
@@ -299,6 +314,9 @@ check "status links the log" bash -c "grep '/deployments/100/' '$T/statuses.txt'
 check "deployed the requested commit" test "$(git -C "$BARE" rev-parse main)" = "$MAIN2"
 check "deploy_build ran for it" grep -qx "$MAIN2" "$WORKTREE/.deployed"
 if grep -rq "$T" logs/; then not_ok "public log masks server paths" "$(public_log 100)"; else ok "public log masks server paths"; fi
+if [[ -n "$HAVE_LR" ]]; then
+  check "public log states each log's retention" grep -q "git-deploy: logrotate: retention 14 days: <worktree>/\*.log" <(public_log 100)
+fi
 check "public log shows progress" grep -q "git-deploy: running deploy_restart" <(public_log 100)
 check "every public log line is timestamped" bash -c "! grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4} git-deploy' <(cat '$T'/logs/100-*.log)"
 

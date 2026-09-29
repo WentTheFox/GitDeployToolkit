@@ -73,13 +73,20 @@ nightly `logrotate.service` red for everybody.
 - Multiple worktrees of one repo (prod + beta) get separate files, named by
   bare repo, and `@WORKTREE@` expands per deploy.
 
-## Evidence for data-retention claims (phase 2)
+## Evidence for data-retention claims
 
-`git-deploy-logrotate --report` prints, per app, each log path and its
-computed retention (`daily` × `rotate 14` → 14 days; `maxage`), so the
-answer to "how long do you keep access logs?" is a command, and the same
-numbers go in `deploy.jsonl`. Optional: a repo test can call the same
-parser to fail CI if a stanza's retention exceeds a stated maximum.
+Implemented: every deploy runs `git-deploy-logrotate report` (no root
+needed, so it works even when the install can't) and prints one
+`git-deploy: logrotate: retention N days: <path>` line per log. The
+`git-deploy` prefix puts them in the public deployment log, where the
+webhook masks the worktree like any other path. The same data goes into
+`deploy.jsonl` as `"retention":[{"path":..,"days":..}]`. An app with no
+`deploy.logrotate` prints a line saying so. Retention is `rotate N` × the
+period (daily/weekly/monthly/yearly), capped by `maxage`; size-only
+stanzas report "unknown".
+
+Still open: a repo test (or CI step) calling `report` to fail when a
+stanza's retention exceeds a stated maximum.
 
 ## Implementation plan
 

@@ -103,23 +103,34 @@ while read -r oldrev newrev ref; do
   # validated and installed into /etc/logrotate.d by a root helper (never
   # run — the system's logrotate timer rotates). Best effort by design: a
   # missing sudo rule or a refused file warns and is recorded in
-  # deploy.jsonl, but never fails the deploy. See docs/logrotate.md.
+  # deploy.jsonl, but never fails the deploy. Every deploy states each log's
+  # retention (needs no root, so it is reported even when the install isn't
+  # possible), and those lines are part of the public summary log. See
+  # docs/logrotate.md.
   LOGROTATE_STATUS="absent"
+  LOGROTATE_RETENTION="[]"
   LOGROTATE_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-logrotate"
+  LOGROTATE_APP=$(basename "$GIT_DIR" .git)
   if [[ -f "$WORKTREE/deploy.logrotate" && ! -L "$WORKTREE/deploy.logrotate" ]]; then
-    if [[ -x "$LOGROTATE_HELPER" ]]; then
+    if [[ ! -x "$LOGROTATE_HELPER" ]]; then
+      LOGROTATE_STATUS="unavailable"
+      echo "git-deploy: logrotate: helper not installed, retention not checked — continuing" >&2
+    elif ! LOGROTATE_RETENTION=$("$LOGROTATE_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.logrotate"); then
+      LOGROTATE_STATUS="refused"
+      LOGROTATE_RETENTION="[]"
+      echo "git-deploy: logrotate: deploy.logrotate not installed (refused) — continuing" >&2
+    else
       # GIT_DEPLOY_LOGROTATE_SUDO="" lets the tests (and a root deploy user) skip sudo.
       # shellcheck disable=SC2086
-      if LOGROTATE_STATUS=$(${GIT_DEPLOY_LOGROTATE_SUDO-sudo -n} "$LOGROTATE_HELPER" install "$(basename "$GIT_DIR" .git)" "$WORKTREE" < "$WORKTREE/deploy.logrotate"); then
-        :
+      if LOGROTATE_STATUS=$(${GIT_DEPLOY_LOGROTATE_SUDO-sudo -n} "$LOGROTATE_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.logrotate"); then
+        echo "git-deploy: logrotate: policy $LOGROTATE_STATUS"
       else
         [[ "$LOGROTATE_STATUS" == refused ]] || LOGROTATE_STATUS="unavailable"
         echo "git-deploy: logrotate: deploy.logrotate not installed ($LOGROTATE_STATUS) — continuing" >&2
       fi
-    else
-      LOGROTATE_STATUS="unavailable"
-      echo "git-deploy: logrotate: helper not installed, skipping deploy.logrotate — continuing" >&2
     fi
+  else
+    echo "git-deploy: logrotate: no deploy.logrotate, log retention is not managed by this repo"
   fi
 
   DEPLOY_STATUS="success"
@@ -167,7 +178,7 @@ while read -r oldrev newrev ref; do
   fi
 
   DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
-  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\""
+  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\",\"retention\":$LOGROTATE_RETENTION"
   NOTIFY_PENDING=""
   notify "$DEPLOY_STATUS" "$DEPLOY_DURATION"
 

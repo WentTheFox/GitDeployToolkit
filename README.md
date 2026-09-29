@@ -259,7 +259,7 @@ server to check without asking:
 
 ```json
 {"event":"start","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea..."}
-{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4,"logrotate":"absent"}
+{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4,"logrotate":"absent","retention":[]}
 ```
 
 `status` is `success` or `failed` (`deploy_build`/`deploy_restart`
@@ -311,9 +311,18 @@ Because logrotate runs as root, installing goes through a restricted
 helper (`git-deploy-logrotate`, installed by `install.sh`) that refuses
 anything unsafe: paths outside the worktree, scripts (`postrotate` etc.),
 `include`, a stanza without `rotate N` or without a non-root `su user
-group`. Placeholders: `@WORKTREE@`, `@APP@`. A refused or uninstallable
-file only warns — the deploy carries on — and `deploy.jsonl`'s `complete`
-line gets `"logrotate":"installed|unchanged|refused|unavailable|absent"`.
+group`. Placeholders: `@WORKTREE@`, `@APP@`. Every deploy states the outcome. With a `deploy.logrotate` it prints one
+line per log file, e.g. `git-deploy: logrotate: retention 14 days:
+<path>` (daily × `rotate 14`; `maxage` caps it), and these lines are part
+of the public deployment log, with the worktree path masked like any other
+server path. That check needs no root, so it is reported even when the
+install isn't possible. Without the file the deploy says so, which is
+itself the evidence that the repo doesn't manage its log retention. A
+refused or uninstallable file only warns — the deploy carries on — and
+`deploy.jsonl`'s `complete` line gets
+`"logrotate":"installed|unchanged|refused|unavailable|absent"` plus
+`"retention":[{"path":"logs/x.log","days":14}]` (paths relative to the
+worktree; empty when absent or refused).
 
 Once per server, allow the helper (the deploy user is usually not root):
 

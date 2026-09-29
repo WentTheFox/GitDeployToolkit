@@ -74,6 +74,12 @@ sudo mv /var/www/myapp/.git /srv/git/myapp.git.pre-toolkit-$(date +%F)   # outsi
 Show what will be moved and confirm before doing this on a production
 tree; delete the backup once you're sure nothing needs it.
 
+Before removing it, grep the app for code that runs `git log`/`rev-parse` in
+its web root (switch it to `.git-deploy-commit` and deploy that first), and
+make sure `deploy.conf` runs composer/npm as the user that owns `vendor/` and
+`node_modules/`: without a `.git`, composer rewrites
+`vendor/composer/installed.php` on the next run.
+
 Apps that need the deployed commit should read `.git-deploy-commit` in the
 worktree root instead (written by the hook on every deploy, before
 `deploy_build`): line 1 is the full sha, line 2 the committer date in ISO

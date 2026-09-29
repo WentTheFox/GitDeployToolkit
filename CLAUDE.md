@@ -464,6 +464,38 @@ that before migrating an app.
   checking for and cleaning this up as **part of the migration**, not an
   optional follow-up — see the checklist below.
 
+## Removing a worktree's leftover `.git` is not free (2026-09-29)
+
+Step 6 of the cleanup checklist below (remove the pre-toolkit `.git` from
+the worktree) bit three ways when done on every migrated app at once. Check
+these **before** deleting, per app:
+
+- **Runtime `git log` readers.** Several apps ask git in their own web
+  root for the deployed commit (a Laravel `GitHelper`, a footer helper, a
+  Discord bot's version string). They got a stale answer before and would
+  get nothing after. Grep the app for `git log|rev-parse|describe` first
+  and switch it to `.git-deploy-commit` (line 1 full sha, line 2 committer
+  date, ISO 8601; fall back to git for local dev) *and deploy that first*,
+  then delete `.git`.
+- **Composer rewrites `vendor/composer/installed.php`.** It records the
+  root package's VCS reference; without a `.git` that reference changes,
+  so composer wants to write the file on the next run. A `deploy.conf`
+  that runs composer as `www-data` against a deploy-user-owned `vendor/`
+  then fails with "Permission denied" on every deploy (Luna did, after a
+  redeploy). Run composer as the user that owns `vendor/`.
+- **A step that only ever ran when its input was unchanged.** Luna's
+  `npm install` was `sudo -u www-data` against a deploy-user-owned
+  `node_modules`; it "worked" for years only because it was skipped unless
+  `package-lock.json` changed. An empty changed-files list (a same-commit
+  redeploy, which is the natural way to test after a cleanup) takes the
+  run-it branch and fails. Test a cleanup by redeploying each app once
+  (`echo "$sha $sha refs/heads/main" | post-receive` from the bare repo,
+  as the deploy user), not by trusting the diff-gated steps.
+
+Things that were fine: every `deploy.conf` already passes
+`--git-dir="$GIT_DIR"` explicitly, and `husky` (v9) exits 0 without a
+`.git`.
+
 ## Required for every migration: GitHub Deployments hookup
 
 Per the user, every app on the toolkit gets the GitHub side too — not
@@ -545,6 +577,7 @@ deploy mechanism if one existed:
    warns on every deploy while one exists, and writes `.git-deploy-commit`
    (sha, ISO date) in the worktree for apps that need the deployed commit —
    see README "Leftover .git in the worktree".
+   Read "Removing a worktree's leftover `.git` is not free" above first.
 
 As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`,
 `Luna`, `DoubleColonBot`, `SpeedrunComMonitor`, `Muffins`,

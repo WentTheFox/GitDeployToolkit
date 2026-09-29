@@ -88,6 +88,17 @@ while read -r oldrev newrev ref; do
   echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
   git --work-tree="$WORKTREE" --git-dir="$GIT_DIR" checkout -f "$BRANCH"
 
+  # The worktree has no .git of its own, so anything in the app that asks
+  # git "what's deployed?" has no answer. Leave one: sha on line 1, committer
+  # date (ISO 8601) on line 2. Untracked, so checkout -f never touches it.
+  # A .git *directory* here is a pre-toolkit relic that answers with a stale
+  # commit instead — see README "Leftover .git in the worktree".
+  git --git-dir="$GIT_DIR" log -1 --format='%H%n%cI' "$newrev" > "$WORKTREE/.git-deploy-commit" \
+    || echo "git-deploy: could not write $WORKTREE/.git-deploy-commit" >&2
+  if [[ -d "$WORKTREE/.git" ]]; then
+    echo "git-deploy: warning: $WORKTREE/.git is a real repository left from before the toolkit; it reports a stale commit. Back it up and remove it (README: Leftover .git in the worktree)" >&2
+  fi
+
   DEPLOY_STATUS="success"
   APP_CONF="$WORKTREE/deploy.conf"
   if [[ -f "$APP_CONF" ]]; then

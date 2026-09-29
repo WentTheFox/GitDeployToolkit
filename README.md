@@ -57,6 +57,28 @@ This creates `/srv/git/myapp.git`, a worktree dir, `deploy.env`, and
 wires up the hook symlink. It prints the `git remote add` command to run
 on your dev machine.
 
+### Leftover `.git` in the worktree (migrating an app that was deployed by a clone)
+
+If the app used to be deployed by `git pull`/a bespoke hook, its worktree
+contains a real `.git` directory. The toolkit updates the files but never
+touches it, so `git log -1` in the web root (footers, "about"/version
+endpoints, Sentry release detection) keeps answering with the last
+pre-toolkit commit. The hook prints a warning while one exists. Check and
+clean up once, after the first toolkit deploy is verified:
+
+```sh
+[ -d /var/www/myapp/.git ] && echo "real .git present"   # a gitfile (plain file) is fine
+sudo mv /var/www/myapp/.git /srv/git/myapp.git.pre-toolkit-$(date +%F)   # outside the web root, restorable
+```
+
+Show what will be moved and confirm before doing this on a production
+tree; delete the backup once you're sure nothing needs it.
+
+Apps that need the deployed commit should read `.git-deploy-commit` in the
+worktree root instead (written by the hook on every deploy, before
+`deploy_build`): line 1 is the full sha, line 2 the committer date in ISO
+8601. It is untracked; make sure it isn't served publicly if that matters.
+
 ## Adding deploy.conf to an app (once per app, any server)
 
 In the app's own repo:
@@ -85,7 +107,7 @@ call.
 
 A "Deploy" button in each app's GitHub Actions tab that ends in exactly
 the same post-receive hook + `deploy.conf` as `git push deploy main` —
-without a self-hosted runner (GitHub discourages those on public repos)
+without self-hosted runners (GitHub discourages those on public repos)
 and without any server credential stored in GitHub:
 
 ```
@@ -156,9 +178,7 @@ as `webhook`) plus `share/git-deploy-webhook`.
    type **application/json**, the server's secret, "Let me select
    individual events" -> **Deployments** only.
 3. Copy `template/deploy-webhook.yml.example` to
-   `.github/workflows/deploy.yml` and commit it. (If the app had the
-   self-hosted-runner workflow below, this replaces it — remove that
-   runner and its `DEPLOY_REMOTE_URL` secret.)
+   `.github/workflows/deploy.yml` and commit it.
 4. Add the repo to the server's token's repository list.
 5. On the repo's main page, click the gear next to "About" and tick
    **Deployments** under "Include in the home page". Deploys work without
@@ -227,104 +247,6 @@ a message in the public log can prefix it with `git-deploy:`.
 - If Cloudflare sits in front and ever starts challenging GitHub's
   requests (Bot Fight Mode, WAF), Recent Deliveries shows non-2xx
   responses; add a skip rule for `/hooks/git-deploy`.
-
-## Triggering deploys from GitHub Actions via a self-hosted runner (alternative)
-
-Superseded by the webhook approach above for public repos; kept for
-reference and for any app already set up this way.
-
-
-Deploy is always just `git push deploy main` — this only changes *who*
-runs that push, from your own machine to a button in GitHub's Actions
-tab, without adopting a third-party CI/deploy subscription (Forge,
-Envoyer, etc.) or opening the server to inbound access from GitHub's
-hosted runners. It works by installing a GitHub Actions **self-hosted**
-runner directly on the server, so the credential/access needed to push
-to `deploy` never has to leave it.
-
-Unlike the post-receive hook, a runner registration can't actually be
-shared across repos unless those repos belong to a GitHub
-**Organization** (org-level runner groups are what makes that possible).
-Under a personal account, each repo gets **its own** runner registration
-— there's no personal-account-wide equivalent. That still doesn't mean
-copy-pasting a bespoke setup per app: run one lightweight runner
-*instance* per app, all on the same physical server if that's where they
-all deploy, all labeled `git-deploy` so every app's `deploy.yml` looks
-identical and this template never has to change per app — the sharing is
-at the label/template/convention level, not the registration itself.
-(If these apps ever move under an Organization, an org-level runner
-group would let one actual runner process serve all of them — a bigger
-change, not required for any of this to work today.)
-
-**Once per app**, on the server:
-
-1. Install a self-hosted runner following GitHub's own instructions for
-   that specific repo (that repo's Settings → Actions → Runners → New
-   self-hosted runner gives you a registration token and the exact
-   `config.sh` command — the token is single-use and tied to that repo,
-   so this step repeats per app). Give it the label `git-deploy`, and a
-   `--name` that identifies which app it's for (the label is what the
-   workflow targets; the name is just so `runner status` output is
-   readable with several installed).
-2. Install it as its own service (`./svc.sh install && ./svc.sh start`,
-   run from that runner's own directory) so it survives reboots — each
-   app's runner is a separate directory/service, even side by side on
-   one server.
-3. Make sure the OS user running it can push to this app's bare repo the
-   same way your own deploy user can — simplest is running it as that
-   same deploy user.
-
-**Also once per app**, in the app's own repo:
-
-1. Copy `template/deploy.yml.example` to `.github/workflows/deploy.yml`
-   and commit it.
-2. Add a repo secret named `DEPLOY_REMOTE_URL` set to the exact value of
-   `git remote add deploy ...` from the "Client side" section above (or
-   `git remote get-url deploy` if you already added it locally).
-
-Then: Actions tab → "Deploy" → Run workflow → type `deploy` to confirm.
-
-### Locking this down
-
-A self-hosted runner executes whatever workflow code the repos pointed
-at it contain — it's real access to the server, not a sandboxed cloud VM
-that disappears after the job. A few things matter more than the rest:
-
-- **If any app using this is a public repo, this is the one that
-  matters most.** GitHub's own guidance is blunt: don't point a
-  self-hosted runner at a workflow that can be triggered by a stranger,
-  e.g. `pull_request`/`pull_request_target` from a fork, or `push` to a
-  branch anyone can open a PR against. `workflow_dispatch` (what
-  `deploy.yml.example` uses) is safe specifically because triggering it
-  requires repo *write* access — a fork/PR alone can't fire it. Keep it
-  that way: never add another trigger to a workflow that targets the
-  `git-deploy` label, on any app.
-- **Per-repo runner registration (the personal-account default above)
-  already gives you this for free** — each runner only ever runs jobs
-  for the one repo it was registered to, nothing wider to accidentally
-  loosen. The thing to watch is the mirror image: if these repos ever
-  move under a GitHub Organization and you switch to one shared
-  org-level runner (see above), don't register it into a runner group
-  scoped to "all repositories" — scope the group explicitly to the apps
-  that need it, or an unrelated future repo in the org inherits the same
-  server access with zero extra steps on your part.
-- **Add an approval gate on top of the confirm input.** The template
-  references a `production` GitHub Environment — create one (Settings →
-  Environments) and add required reviewers there to require a second
-  person's (or your own second-factor/second-session) approval before
-  the job actually runs. Free on public repos, no-op until configured.
-- **Know what OS user the runner runs as.** If it's the same user that
-  already pushes to every app's `deploy` remote on that server (see the
-  pitfalls in CLAUDE.md — one deploy user across many apps is this
-  toolkit's existing pattern), a compromised runner can reach every app
-  on the box, not just the one that triggered it. That's a pre-existing
-  tradeoff of this toolkit's simplicity, not something the GitHub
-  Actions trigger introduces — just don't assume the runner is sandboxed
-  to one app if it isn't.
-- Leave the runner's own auto-update on, and keep its scoped sudo rule
-  (see "sudo for restarts" below) exactly as narrow as any other deploy
-  path already requires — the GitHub Actions trigger doesn't need any
-  privilege beyond what `git push deploy main` already needed by hand.
 
 ## Deploy log
 

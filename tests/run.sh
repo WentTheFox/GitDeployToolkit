@@ -115,6 +115,14 @@ check "deploy_build ran" grep -qx "$MAIN1" "$WORKTREE/.deployed"
 check "deploy_restart ran" grep -q "remote: restarted" <<< "$out"
 if grep -q "git-deploy: failed" <<< "$out"; then not_ok "tolerated failures print no 'failed' line" "$out"; else ok "tolerated failures print no 'failed' line"; fi
 check "deploy.jsonl records success" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+check "records deployed sha for the app" bash -c "[ \"\$(sed -n 1p '$WORKTREE/.git-deploy-commit')\" = '$MAIN1' ]"
+check "records deployed commit date" bash -c "sed -n 2p '$WORKTREE/.git-deploy-commit' | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'"
+if grep -q "left from before the toolkit" <<< "$out"; then not_ok "no leftover-.git warning on a clean worktree" "$out"; else ok "no leftover-.git warning on a clean worktree"; fi
+mkdir "$WORKTREE/.git"
+LEFTOVER=$(commit "with leftover git")
+out=$(cd dev && git push "$BARE" main 2>&1)
+check "warns about a leftover .git" grep -q "left from before the toolkit" <<< "$out"
+rmdir "$WORKTREE/.git"
 
 FAIL1=$(commit "break restart" add)
 out=$(cd dev && git push "$BARE" main 2>&1)

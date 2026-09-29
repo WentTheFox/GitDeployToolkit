@@ -31,36 +31,12 @@ without a reason:
   changes, it's a real architecture change, not a tweak, and should be
   confirmed with the user first.
 
-## Optional: GitHub Actions deploy trigger
+## Removed: self-hosted runner trigger
 
-`template/deploy.yml.example` (copied per-app into that app's own
-`.github/workflows/deploy.yml`, same relationship `deploy.conf.example`
-has to `deploy.conf` — a workflow file can't live centrally, GitHub only
-looks inside the repo it belongs to) gives a `workflow_dispatch`-only
-"Deploy" button that just runs `git push deploy main` from a
-**self-hosted** runner living on the server itself. Deliberately not:
-GitHub-hosted runners + an SSH secret (would need inbound network access
-to the server and a credential leaving it), or push-to-main auto-deploy
-(deploying briefly takes the app down, so it should always be a
-deliberate in-the-moment click, never automatic off a merge — matches
-`when`'s own CLAUDE.md rule about never pushing to `deploy` without
-explicit go-ahead). Every app's workflow targets the same `git-deploy`
-runner **label**, mirroring the toolkit's own "one hook shared by every
-app" design — but the underlying registration is NOT actually shared:
-these repos are under a personal GitHub account, not an Organization,
-and GitHub only lets a runner *registration* be shared across repos via
-an org's runner groups. So in practice this means one runner **instance**
-per app (same label, separate registration/service, can coexist on one
-physical server) — don't assume registering a runner for one app also
-covers another. If these repos ever move under an Organization, one
-real shared runner via an org-level runner group becomes possible; not
-needed for any of this to work today. See README.md's "Triggering
-deploys from GitHub Actions" for the actual setup steps (this is
-server-side runner registration, so — like `install.sh` — it can't be
-done from within this repo, only documented) and its "Locking this down"
-subsection for the security considerations (this repo being public is
-the one that matters most: never let anything but `workflow_dispatch`
-target the `git-deploy` label).
+The README section for the self-hosted-runner "Deploy" button was removed
+at the user's request (2026-09-29); the deployment webhook below replaced
+it. `template/deploy.yml.example` is still in the tree, undocumented —
+ask before deleting it.
 
 ## Optional: GitHub deployment webhook (supersedes the runner trigger above)
 
@@ -543,6 +519,14 @@ deploy mechanism if one existed:
    user first, same as any other push to `deploy` for that app.
 5. Note in `servers.local.yml` that this cleanup is done (or still
    pending) for that app, so it isn't silently re-discovered later.
+6. Check the worktree for a real `.git` directory (`[ -d <worktree>/.git ]`):
+   a clone left from the old setup reports a stale commit to anything that
+   runs `git log -1` in the web root (Winterchilla's footer did). Show the
+   user what's there and get confirmation, then move it outside the web
+   root as `<bare-repo>.pre-toolkit-<date>` rather than deleting. The hook
+   warns on every deploy while one exists, and writes `.git-deploy-commit`
+   (sha, ISO date) in the worktree for apps that need the deployed commit —
+   see README "Leftover .git in the worktree".
 
 As of this note: `when`, `fantastick`, `pennycurve`, `Celestia`,
 `Luna`, `DoubleColonBot`, `SpeedrunComMonitor`, `Muffins`,

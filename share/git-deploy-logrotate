@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Install an app's own logrotate definition (deploy.logrotate) for the
+shared post-receive hook. See docs/logrotate.md.
+
+  git-deploy-logrotate install <app> <worktree>  < deploy.logrotate
+  git-deploy-logrotate report  <app> <worktree>  < deploy.logrotate
+  git-deploy-logrotate remove  <app>
+  git-deploy-logrotate adopt   <file-in-logrotate.d>
+
+`install` runs as root (via a narrow sudoers rule) and the content comes
+from a repo, so this file is the security boundary. It parses the
+definition and accepts only a small whitelist of directives; anything
+else (postrotate/prerotate scripts, include, olddir, compresscmd, mail...)
+refuses the whole file. Every stanza must name a non-root `su` user, so
+rotation itself never runs as root, must set a retention (`rotate`), and
+may only touch paths inside the app's worktree. It never rotates anything:
+validation is `logrotate -d`, and the system's logrotate timer does the rest.
+
+stdout: one word, installed | unchanged | refused | ok (report).
+stderr: human-readable reasons. Exit 0 unless refused (1) or misused (2).
+
+Test/override knobs (ignored by sudo's env_reset in production):
+  LOGROTATE_D, LOGROTATE_BIN, GIT_DEPLOY_LOGROTATE_ROOTS (colon list),
+  GIT_DEPLOY_LOGROTATE_BACKUP.
+"""
+import os, pwd, re, shlex, shutil, subprocess, sys, tempfile
+
+LOGROTATE_D = os.environ.get("LOGROTATE_D", "/etc/logrotate.d")
+LOGROTATE_BIN = os.environ.get("LOGROTATE_BIN", "logrotate")
+BACKUP_DIR = os.environ.get("GIT_DEPLOY_LOGROTATE_BACKUP", "/root/logrotate.pre-toolkit")
+ROOTS_FILE = "/etc/git-deploy/logrotate.roots"
+DEFAULT_ROOTS = ["/var/www", "/var/node"]
+MARKER = "# managed by git-deploy"
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+PATH_RE = re.compile(r"^/[A-Za-z0-9._/+-]*$")
+PERIOD_DAYS = {"hourly": 1 / 24, "daily": 1, "weekly": 7, "monthly": 30, "yearly": 365}
+
+FLAGS = {"daily", "weekly", "monthly", "yearly", "hourly", "missingok", "nomissingok",
+         "notifempty", "ifempty", "compress", "nocompress", "delaycompress",
+         "nodelaycompress", "copytruncate", "nocopytruncate", "copy", "nocopy",
+         "nocreate", "dateext", "nodateext", "sharedscripts", "nosharedscripts"}
+SIZE_RE = re.compile(r"^\d+[kKmMgG]?$")
+
+
+class Refused(Exception):
+    pass
+
+
+def say(msg):
+    print("git-deploy: logrotate: " + msg, file=sys.stderr)
+
+
+def allowed_roots():
+    env = os.environ.get("GIT_DEPLOY_LOGROTATE_ROOTS")
+    if env:
+        roots = env.split(":")
+    elif os.path.isfile(ROOTS_FILE):
+        roots = [l.strip() for l in open(ROOTS_FILE) if l.strip() and not l.startswith("#")]
+    else:
+        roots = DEFAULT_ROOTS
+    return [os.path.realpath(r) for r in roots]
+
+
+def within(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def check_worktree(worktree):
+    if not PATH_RE.match(worktree) or ".." in worktree.split("/"):
+        raise Refused("unsafe worktree path")
+    real = os.path.realpath(worktree)
+    if not any(within(real, r) and real != r for r in allowed_roots()):
+        raise Refused("worktree is not inside an allowed root (%s)" % ", ".join(allowed_roots()))
+    return real
+
+
+def non_root_user(name):
+    try:
+        pw = pwd.getpwnam(name)
+    except KeyError:
+        raise Refused("su: no such user %r" % name)
+    if pw.pw_uid == 0:
+        raise Refused("su: rotation must not run as root")
+
+
+def parse(text, app, worktree):
+    """Return a list of stanzas: {paths, dirs, line}. Raises Refused."""
+    text = text.replace("@WORKTREE@", worktree).replace("@APP@", app)
+    m = re.search(r"@[A-Z_]+@", text)
+    if m:
+        raise Refused("unknown placeholder %s" % m.group(0))
+    stanzas, header, cur = [], [], None
+    for no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if cur is None:
+            if "{" in line:
+                if not line.endswith("{"):
+                    raise Refused("line %d: '{' must end the line" % no)
+                header.append(line[:-1])
+                try:
+                    paths = shlex.split(" ".join(header))
+                except ValueError as e:
+                    raise Refused("line %d: %s" % (no, e))
+                if not paths:
+                    raise Refused("line %d: stanza without a path" % no)
+                cur = {"paths": paths, "dirs": {}, "line": no}
+                header = []
+            else:
+                header.append(line)
+            continue
+        if line == "}":
+            stanzas.append(cur)
+            cur = None
+            continue
+        tok = shlex.split(line)
+        key, args = tok[0], tok[1:]
+        if "{" in line or "}" in line:
+            raise Refused("line %d: unexpected brace" % no)
+        if key in FLAGS:
+            if args:
+                raise Refused("line %d: %s takes no arguments" % (no, key))
+        elif key in ("rotate", "maxage", "start"):
+            if len(args) != 1 or not args[0].isdigit():
+                raise Refused("line %d: %s needs a number" % (no, key))
+        elif key in ("size", "minsize", "maxsize"):
+            if len(args) != 1 or not SIZE_RE.match(args[0]):
+                raise Refused("line %d: bad %s" % (no, key))
+        elif key == "su":
+            if len(args) != 2:
+                raise Refused("line %d: su needs a user and a group" % no)
+            non_root_user(args[0])
+            if args[1] == "root":
+                raise Refused("line %d: su group must not be root" % no)
+        elif key == "create":
+            if len(args) not in (0, 3) or (args and not re.match(r"^0?[0-7]{3,4}$", args[0])):
+                raise Refused("line %d: create needs 'mode user group' or nothing" % no)
+        else:
+            raise Refused("line %d: directive %r is not allowed (scripts, include, olddir, "
+                          "compresscmd, mail... are refused)" % (no, key))
+        cur["dirs"][key] = args
+    if cur is not None:
+        raise Refused("unterminated stanza starting at line %d" % cur["line"])
+    if header:
+        raise Refused("stray text outside a stanza: %s" % " ".join(header))
+    if not stanzas:
+        raise Refused("no stanzas")
+    return stanzas
+
+
+def check_stanza(st, worktree):
+    d = st["dirs"]
+    where = "stanza at line %d" % st["line"]
+    if "su" not in d:
+        raise Refused("%s: needs 'su <user> <group>' (rotation must not run as root)" % where)
+    if "rotate" not in d:
+        raise Refused("%s: needs 'rotate N' (every log must state its retention)" % where)
+    for p in st["paths"]:
+        directory, base = os.path.split(p)
+        if not PATH_RE.match(directory + "/") or re.search(r"[*?\[{]", directory):
+            raise Refused("%s: unsafe path %s" % (where, p))
+        if ".." in p.split("/") or base in ("", ".", ".."):
+            raise Refused("%s: unsafe path %s" % (where, p))
+        if not within(os.path.realpath(directory), worktree):
+            raise Refused("%s: %s is outside the worktree" % (where, p))
+    return st
+
+
+def retention_days(st):
+    d = st["dirs"]
+    period = next((k for k in PERIOD_DAYS if k in d), None)
+    if period is None:
+        return None
+    days = PERIOD_DAYS[period] * int(d["rotate"][0])
+    if "maxage" in d:
+        days = min(days, int(d["maxage"][0]))
+    return days
+
+
+def literal_paths(stanzas):
+    return {p for st in stanzas for p in st["paths"]}
+
+
+def validate(content, target_name):
+    """logrotate -d on the candidate, in the config dir under an ignored name."""
+    tmp = os.path.join(LOGROTATE_D, "%s.dpkg-new" % target_name)
+    with open(tmp, "w") as f:
+        f.write(content)
+    os.chmod(tmp, 0o644)
+    state = tempfile.mktemp(prefix="git-deploy-logrotate-state-")
+    try:
+        r = subprocess.run([LOGROTATE_BIN, "-d", "-s", state, tmp], capture_output=True, text=True)
+    except FileNotFoundError:
+        os.unlink(tmp)
+        raise Refused("logrotate is not installed")
+    finally:
+        if os.path.exists(state):
+            os.unlink(state)
+    out = r.stdout + r.stderr
+    errors = [l for l in out.splitlines() if l.startswith("error:")]
+    if r.returncode != 0 or errors:
+        os.unlink(tmp)
+        raise Refused("logrotate -d rejected it: " + "; ".join(errors or [out.strip()[-300:]]))
+    return tmp
+
+
+def cmd_report_or_install(mode, app, worktree):
+    if not NAME_RE.match(app):
+        raise Refused("bad app name")
+    worktree = check_worktree(worktree)
+    text = sys.stdin.read()
+    stanzas = [check_stanza(s, worktree) for s in parse(text, app, worktree)]
+    for st in stanzas:
+        days = retention_days(st)
+        keep = "%g days" % days if days is not None else "unknown (size-based)"
+        for p in st["paths"]:
+            say("retention %s: %s" % (keep, p))
+    if mode == "report":
+        print("ok")
+        return
+    name = "git-deploy-%s" % app
+    target = os.path.join(LOGROTATE_D, name)
+    if os.path.exists(target) and not open(target).readline().startswith(MARKER):
+        raise Refused("%s exists and is not managed by git-deploy; adopt it first "
+                      "(git-deploy-logrotate adopt %s)" % (target, name))
+    mine = literal_paths(stanzas)
+    for other in sorted(os.listdir(LOGROTATE_D)):
+        op = os.path.join(LOGROTATE_D, other)
+        if other == name or not os.path.isfile(op) or re.search(r"\.(dpkg-\w+|rpm\w+|bak)$|~$", other):
+            continue
+        for l in open(op, errors="replace"):
+            if not l.lstrip().startswith("#") and mine & set(l.replace("{", " ").split()):
+                raise Refused("%s already lists %s; adopt it first" %
+                              (op, sorted(mine & set(l.replace("{", " ").split()))[0]))
+    content = "%s — edit deploy.logrotate in the app's repo, not this file\n# app: %s\n%s" % (
+        MARKER, app, text.replace("@WORKTREE@", worktree).replace("@APP@", app))
+    if not content.endswith("\n"):
+        content += "\n"
+    if os.path.exists(target) and open(target).read() == content:
+        print("unchanged")
+        return
+    tmp = validate(content, name)
+    os.replace(tmp, target)
+    print("installed")
+
+
+def cmd_remove(app):
+    target = os.path.join(LOGROTATE_D, "git-deploy-%s" % app)
+    if not NAME_RE.match(app) or not os.path.exists(target):
+        raise Refused("nothing to remove")
+    if not open(target).readline().startswith(MARKER):
+        raise Refused("not managed by git-deploy")
+    os.unlink(target)
+    print("ok")
+
+
+def cmd_adopt(name):
+    src = os.path.join(LOGROTATE_D, name)
+    if not NAME_RE.match(name) or name.startswith("git-deploy-") or not os.path.isfile(src):
+        raise Refused("nothing to adopt")
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    shutil.move(src, os.path.join(BACKUP_DIR, name))
+    say("moved %s to %s" % (src, BACKUP_DIR))
+    print("ok")
+
+
+def main(argv):
+    try:
+        if len(argv) == 4 and argv[1] in ("install", "report"):
+            cmd_report_or_install(argv[1], argv[2], argv[3])
+        elif len(argv) == 3 and argv[1] == "remove":
+            cmd_remove(argv[2])
+        elif len(argv) == 3 and argv[1] == "adopt":
+            cmd_adopt(argv[2])
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except Refused as e:
+        say("refused (%s)" % e)
+        print("refused")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

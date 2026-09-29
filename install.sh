@@ -18,6 +18,9 @@ fi
 install -d "$LIB_DIR"
 install -m 0755 "$SRC_DIR/share/post-receive" "$LIB_DIR/post-receive"
 install -m 0755 "$SRC_DIR/share/git-deploy-notify" "$LIB_DIR/git-deploy-notify"
+# Optional per-repo logrotate definitions (deploy.logrotate). Only ever
+# invoked through the sudoers rule printed below; harmless until then.
+install -m 0755 "$SRC_DIR/share/git-deploy-logrotate" "$LIB_DIR/git-deploy-logrotate"
 install -m 0755 "$SRC_DIR/bin/git-deploy-new" "$BIN_DIR/git-deploy-new"
 
 # Optional GitHub deployment webhook listener. Installing these files is
@@ -36,5 +39,8 @@ echo "git-deploy-toolkit installed:"
 echo "  hook:   $LIB_DIR/post-receive"
 echo "  helper: $BIN_DIR/git-deploy-new"
 echo "  webhook (optional): $LIB_DIR/git-deploy-webhook, git-deploy-webhook@.service"
+echo "  logrotate (optional): $LIB_DIR/git-deploy-logrotate — for apps with a deploy.logrotate, allow it with"
+echo "    <deploy-user> ALL=(root) NOPASSWD: $LIB_DIR/git-deploy-logrotate install *"
+echo "    in /etc/sudoers.d/git-deploy-logrotate (mode 0440). See README."
 echo
 echo "Create a new app with: git-deploy-new <app-name> [worktree-path] [branch]"

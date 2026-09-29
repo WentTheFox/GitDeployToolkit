@@ -1,0 +1,77 @@
+# deploy.logrotate — this app's log retention policy, versioned with the code.
+# Copy to the repo root as `deploy.logrotate`. Opt-in: an app without this
+# file is left exactly as it is.
+#
+# On every deploy the toolkit validates this (logrotate -d, which never
+# rotates anything) and installs it as /etc/logrotate.d/git-deploy-<app>.
+# The regular logrotate timer does the actual rotating, on its own schedule.
+#
+# Plain logrotate syntax, with two placeholders:
+#   @WORKTREE@  this deploy's worktree (differs between e.g. prod and beta)
+#   @APP@       the bare repo's name, without .git
+#
+# Deliberately NOT allowed (the install is refused, deploy carries on):
+#   - paths outside @WORKTREE@ or the deploy user's pm2 log dir
+#     (logrotate runs as root; the repo must not be able to point it at
+#     /etc or anyone else's files)
+#   - prerotate/postrotate/firstaction/lastaction/preremove scripts
+#     (would run repo-supplied code as root)
+#   - include
+# Use copytruncate (or `create` + app-side reopen) instead of a postrotate.
+#
+# Retention is the point of this file: every stanza must say how long it
+# keeps logs (`rotate N` with `daily|weekly|monthly`, or `maxage`), and the
+# deploy log records the resulting retention in days.
+
+# Web-server logs written into the worktree by nginx (www-data).
+# `su` is REQUIRED when the directory is group-writable, or logrotate skips
+# the file and exits non-zero — which fails the whole system logrotate run.
+@WORKTREE@/storage/logs/nginx-access.log
+@WORKTREE@/storage/logs/nginx-error.log {
+	su www-data www-data
+	daily
+	rotate 14
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}
+
+# Laravel's own log (channel `single`); use `daily` channel + this glob if
+# the app writes laravel-YYYY-MM-DD.log files instead.
+@WORKTREE@/storage/logs/laravel.log {
+	su www-data www-data
+	daily
+	rotate 30
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}
+
+# pm2 apps: give the app its own log files inside the worktree instead of
+# the shared ~/.pm2/logs, then rotate them here. In the app's pm2.json /
+# ecosystem file (and add `logs/` to .gitignore):
+#
+#   "out_file":   "logs/pm2-out.log",
+#   "error_file": "logs/pm2-error.log",
+#   "merge_logs": true
+#
+# pm2 reads these paths only when a process is STARTED. Moving an existing
+# app over needs a one-time `pm2 delete <name>` + `pm2 start` (a plain
+# `pm2 restart` keeps the old paths). The deploy user owns these files, so
+# `su` names that user (replace deploy/deploy with the real user and group).
+# copytruncate is what lets pm2 keep writing without a reload.
+@WORKTREE@/logs/pm2-out.log
+@WORKTREE@/logs/pm2-error.log {
+	su deploy deploy
+	daily
+	rotate 14
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}

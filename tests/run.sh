@@ -53,6 +53,7 @@ section "syntax"
 for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new install.sh tests/run.sh; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
+check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
 check "hooks.json is valid JSON once templated" \
   "$PYTHON" -c 'import json,sys; json.loads(open(sys.argv[1]).read().replace("{{ getenv \"GIT_DEPLOY_WEBHOOK_SECRET\" }}","x"))' "$ROOT/share/webhook-hooks.json"
 for f in "$ROOT"/template/*.yml.example; do
@@ -129,6 +130,110 @@ out=$(cd dev && git push "$BARE" main 2>&1)
 check "failing command is named" grep -q "git-deploy: failed (exit 3) in deploy_restart: sh -c 'cat private-output.txt; exit 3'" <<< "$out"
 if grep -q "git-deploy: deployed" <<< "$out"; then not_ok "no 'deployed' line after a failure" "$out"; else ok "no 'deployed' line after a failure"; fi
 check "deploy.jsonl records failure" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"failed\"'"
+
+# --- logrotate definitions ------------------------------------------------
+
+section "deploy.logrotate helper"
+command -v logrotate > /dev/null && HAVE_LR=1 || HAVE_LR=""
+LRH="$ROOT/share/git-deploy-logrotate"
+LRD="$T/logrotate.d"; LRW="$T/lrwww/lrapp"; mkdir -p "$LRD" "$LRW/logs"
+export LOGROTATE_D="$LRD" GIT_DEPLOY_LOGROTATE_ROOTS="$T/lrwww" GIT_DEPLOY_LOGROTATE_BACKUP="$T/lrbackup"
+ME=$(id -un); MYGRP=$(id -gn)
+lr() { "$PYTHON" "$LRH" "$@" 2> lr.err; } # lr <cmd> ... < definition ; stdout = status word
+good_def() { printf '@WORKTREE@/logs/*.log {\n\tsu %s %s\n\tdaily\n\trotate 14\n\tmissingok\n\tcopytruncate\n}\n' "$ME" "$MYGRP"; }
+refuses() { # refuses <description> <definition-text> [error substring]
+  local out; out=$(printf '%s\n' "$2" | lr install lrapp "$LRW" || true)
+  if [[ "$out" == refused && ! -e "$LRD/git-deploy-lrapp" ]] && grep -q -- "${3:-refused}" lr.err; then ok "refuses $1"; else not_ok "refuses $1" "$(cat lr.err) [out=$out]"; fi
+}
+if [[ -z "$HAVE_LR" ]]; then
+  echo "  skip logrotate not installed"
+else
+  check "installs a valid definition" test "$(good_def | lr install lrapp "$LRW")" = installed
+  check "installed file is marked and expanded" bash -c "head -1 '$LRD/git-deploy-lrapp' | grep -q '^# managed by git-deploy' && grep -q '^$LRW/logs/\\*.log {' '$LRD/git-deploy-lrapp'"
+  check "reports retention in days" grep -q "retention 14 days" lr.err
+  check "same definition again -> unchanged" test "$(good_def | lr install lrapp "$LRW")" = unchanged
+  check "nothing was rotated" test -z "$(ls "$LRW/logs")"
+  rm -f "$LRD/git-deploy-lrapp"
+  refuses "a postrotate script" "$(good_def | sed 's/}/\tpostrotate\n\t  touch \/tmp\/x\n\tendscript\n}/')" "not allowed"
+  refuses "include" "include /etc/passwd
+$(good_def)" "outside the worktree"
+  refuses "olddir" "$(good_def | sed 's/daily/olddir \/etc/')" "not allowed"
+  refuses "a path outside the worktree" "/etc/shadow {
+	su $ME $MYGRP
+	rotate 5
+	daily
+}" "outside the worktree"
+  refuses "a .. escape" "@WORKTREE@/../other/x.log {
+	su $ME $MYGRP
+	rotate 5
+	daily
+}" "unsafe path"
+  refuses "a symlink escaping the worktree" "$(ln -sfn /etc "$LRW/escape"; printf '@WORKTREE@/escape/x.log {\n\tsu %s %s\n\trotate 5\n\tdaily\n}\n' "$ME" "$MYGRP")" "outside the worktree"
+  rm -f "$LRW/escape"
+  refuses "a stanza without su" "@WORKTREE@/logs/a.log {
+	rotate 5
+	daily
+}" "needs 'su"
+  refuses "su root" "@WORKTREE@/logs/a.log {
+	su root root
+	rotate 5
+	daily
+}" "root"
+  refuses "a stanza without retention" "@WORKTREE@/logs/a.log {
+	su $ME $MYGRP
+	daily
+}" "needs 'rotate"
+  refuses "an unknown placeholder" "@NOPE@/x.log {
+	su $ME $MYGRP
+	rotate 5
+}" "placeholder"
+  check "refuses a worktree outside the allowed roots" bash -c "! good_def() { :; }; printf '/x/y.log {\n}\n' | GIT_DEPLOY_LOGROTATE_ROOTS='$T/elsewhere' '$PYTHON' '$LRH' install lrapp '$LRW' 2>&1 | grep -q 'allowed root'"
+  # adoption: a hand-made file must not be overwritten, and the same log must not be listed twice
+  printf '%s/logs/*.log {\n\tweekly\n}\n' "$LRW" > "$LRD/lrapp"
+  out=$(good_def | lr install lrapp "$LRW" || true)
+  if [[ "$out" == refused ]] && grep -q "adopt it first" lr.err; then ok "won't list a log a hand-made file already covers"; else not_ok "won't list a log a hand-made file already covers" "$(cat lr.err)"; fi
+  check "adopt moves the hand-made file aside" bash -c "'$PYTHON' '$LRH' adopt lrapp > /dev/null 2>&1 && test -f '$T/lrbackup/lrapp' && ! test -e '$LRD/lrapp'"
+  check "then the definition installs" test "$(good_def | lr install lrapp "$LRW")" = installed
+  # a file that isn't ours is never overwritten, even under our name
+  printf 'weekly\n' > "$LRD/git-deploy-other"
+  out=$(good_def | lr install other "$LRW" || true)
+  check "won't overwrite an unmanaged git-deploy-<app> file" test "$out" = refused
+  check "unmanaged file untouched" test "$(cat "$LRD/git-deploy-other")" = weekly
+  check "remove deletes a managed file" bash -c "'$PYTHON' '$LRH' remove lrapp > /dev/null 2>&1 && ! test -e '$LRD/git-deploy-lrapp'"
+  check "remove refuses an unmanaged file" bash -c "! '$PYTHON' '$LRH' remove other > /dev/null 2>&1 && test -e '$LRD/git-deploy-other'"
+  rm -f "$LRD/git-deploy-other"
+
+  section "deploy.logrotate through the hook"
+  export GIT_DEPLOY_LOGROTATE_SUDO="" # no sudo in the test; the helper runs as this user
+  # the helper only accepts a worktree under an allowed root
+  export GIT_DEPLOY_LOGROTATE_ROOTS="$T/www:$T/lrwww"
+  # The earlier failure test left FAILME committed; lift it so "deploy still
+  # succeeded" means something, and put it back at the end.
+  commit "unbreak restart" rm > /dev/null
+  good_def | sed "s#@WORKTREE@/logs#@WORKTREE@#" > "$WORKTREE/deploy.logrotate"
+  mkdir -p "$WORKTREE/logs"; rm -f "$LRD"/git-deploy-*
+  commit "with logrotate" > /dev/null
+  out=$(cd dev && git push "$BARE" main 2>&1)
+  check "hook installs the app's definition" test -f "$LRD/git-deploy-app"
+  check "deploy.jsonl records logrotate=installed" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"installed\"'"
+  check "deploy still succeeded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+  printf 'postrotate\n' > "$WORKTREE/deploy.logrotate"
+  rm -f "$LRD"/git-deploy-*
+  commit "bad logrotate" > /dev/null
+  out=$(cd dev && git push "$BARE" main 2>&1)
+  check "refused definition only warns" grep -q "deploy.logrotate not installed (refused)" <<< "$out"
+  check "refused definition doesn't fail the deploy" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+  check "refusal is recorded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"refused\"'"
+  check "nothing installed on refusal" test -z "$(ls "$LRD")"
+  rm -f "$WORKTREE/deploy.logrotate"
+  commit "no logrotate" > /dev/null
+  out=$(cd dev && git push "$BARE" main 2>&1)
+  check "no deploy.logrotate -> absent, nothing installed" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"logrotate\":\"absent\"' && test -z \"\$(ls '$LRD')\""
+  commit "break restart again" add > /dev/null
+  (cd dev && git push -q "$BARE" main > /dev/null 2>&1) || true
+  unset GIT_DEPLOY_LOGROTATE_SUDO GIT_DEPLOY_LOGROTATE_ROOTS
+fi
+unset LOGROTATE_D GIT_DEPLOY_LOGROTATE_ROOTS GIT_DEPLOY_LOGROTATE_BACKUP
 
 # --- webhook ------------------------------------------------------------
 

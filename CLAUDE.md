@@ -277,6 +277,24 @@ changes, it's the source of truth for the intended UX.
 - Next steps whenever the user wants to proceed: same recipe as the apps
   above, applied to whatever's next.
 
+## Optional: per-repo logrotate definitions (2026-09-29)
+
+An app may commit `deploy.logrotate` (template in
+`template/deploy.logrotate.example`, design in `docs/logrotate.md`, usage
+in README "Log retention"). The hook pipes it to `git-deploy-logrotate`
+via `sudo -n` (rule printed by `install.sh`); that root helper is the
+security boundary and refuses scripts/include/olddir, paths outside the
+worktree, missing `rotate`, missing non-root `su`. It validates with
+`logrotate -d` and never rotates. **Warn-only by the user's decision**: a
+refused/uninstallable file never fails a deploy; it is recorded as
+`"logrotate":...` in `deploy.jsonl`. Opt-in, gradual: no file = untouched;
+hand-made files in `/etc/logrotate.d` are never overwritten (`adopt`
+moves them aside). pm2 logs are in scope via per-app `out_file`/`error_file`
+inside the worktree. Tested in `tests/run.sh` (mutation-checked).
+The per-server inventory of existing logrotate setups and every log file
+per project is in `servers.local.yml` under each host's `logrotate:` — read
+that before migrating an app.
+
 ## Pitfalls hit during the first real migration (fantastick)
 
 - **Bare repo ownership.** `git-deploy-new` needs root (it writes under

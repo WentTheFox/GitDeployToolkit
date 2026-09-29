@@ -259,7 +259,7 @@ server to check without asking:
 
 ```json
 {"event":"start","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea..."}
-{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4}
+{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4,"logrotate":"absent"}
 ```
 
 `status` is `success` or `failed` (`deploy_build`/`deploy_restart`
@@ -296,6 +296,43 @@ Anyone with the URL can post to the channel, so it's never printed or put
 on a command line, and `deploy.env` should be readable by the deploy user
 only: `git-deploy-new` creates it `600`; for an older app,
 `chmod 600 /srv/git/<app>.git/deploy.env`.
+
+## Log retention (optional)
+
+An app can carry its own logrotate definition in its repo, so its
+retention policy is versioned with the code. Copy
+`template/deploy.logrotate.example` to `deploy.logrotate` in the repo root
+and edit it. On each deploy the hook validates it (`logrotate -d`, which
+changes nothing) and installs it as `/etc/logrotate.d/git-deploy-<app>`;
+the system's logrotate timer does the rotating — the toolkit never runs
+logrotate itself. An app without the file is not touched at all.
+
+Because logrotate runs as root, installing goes through a restricted
+helper (`git-deploy-logrotate`, installed by `install.sh`) that refuses
+anything unsafe: paths outside the worktree, scripts (`postrotate` etc.),
+`include`, a stanza without `rotate N` or without a non-root `su user
+group`. Placeholders: `@WORKTREE@`, `@APP@`. A refused or uninstallable
+file only warns — the deploy carries on — and `deploy.jsonl`'s `complete`
+line gets `"logrotate":"installed|unchanged|refused|unavailable|absent"`.
+
+Once per server, allow the helper (the deploy user is usually not root):
+
+```
+# /etc/sudoers.d/git-deploy-logrotate  (mode 0440)
+deploy ALL=(root) NOPASSWD: /usr/local/lib/git-deploy/git-deploy-logrotate install *
+```
+
+Worktrees must be under `/var/www` or `/var/node` (one path per line in
+`/etc/git-deploy/logrotate.roots` overrides that). For pm2 apps, point
+pm2's `out_file`/`error_file` at a file inside the worktree (gitignored)
+so the same definition covers it; pm2 only reads those paths when the
+process is started, so moving an existing app's logs needs one `pm2
+delete` + start. Adopting an app that already has a hand-made file in
+`/etc/logrotate.d` for the same logs: `sudo git-deploy-logrotate adopt
+<file>` moves it to `/root/logrotate.pre-toolkit/` (otherwise the helper
+refuses, since logrotate errors on a log listed twice). `git-deploy-logrotate
+report <app> <worktree> < deploy.logrotate` prints each log's retention in
+days without installing anything. Design notes: `docs/logrotate.md`.
 
 ## sudo for restarts
 

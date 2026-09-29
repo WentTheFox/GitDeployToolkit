@@ -50,6 +50,13 @@
 #                              it only gets the "git-deploy..." progress
 #                              lines (which step ran, which command failed
 #                              with what exit code), never command output.
+#   GIT_DEPLOY_LOG_BASE_URL_<OWNER>
+#                              same, for repos of one owner, taking
+#                              precedence (same <OWNER> naming as the
+#                              token) — e.g. to serve one owner's logs from
+#                              a host name of its own, so its public
+#                              deployment statuses don't link another
+#                              domain. Same log dir either way.
 #   GIT_DEPLOY_LOG_PUBLIC      "summary" (default) or "full" to put all
 #                              output in that file too. The journal
 #                              (journalctl -t git-deploy-webhook) always
@@ -120,8 +127,11 @@ fi
 [[ "$MODE" != push || "$OLDREV" =~ ^[0-9a-f]{40}$ ]] || die "bad oldrev: $OLDREV"
 
 API="${GIT_DEPLOY_GITHUB_API:-https://api.github.com}"
-owner_var="GIT_DEPLOY_GITHUB_TOKEN_$(tr 'a-z.-' 'A-Z__' <<< "${REPO%%/*}")"
+owner_suffix=$(tr 'a-z.-' 'A-Z__' <<< "${REPO%%/*}")
+owner_var="GIT_DEPLOY_GITHUB_TOKEN_$owner_suffix"
 GIT_DEPLOY_GITHUB_TOKEN="${!owner_var:-${GIT_DEPLOY_GITHUB_TOKEN:-}}"
+owner_var="GIT_DEPLOY_LOG_BASE_URL_$owner_suffix"
+GIT_DEPLOY_LOG_BASE_URL="${!owner_var:-${GIT_DEPLOY_LOG_BASE_URL:-}}"
 LOG_URL="" STARTED="" FINISHED=""
 report() { # report <state> <description>
   case "$1" in

@@ -303,9 +303,12 @@ check "commit GitHub lacks -> says so" grep -q "doesn't have ${PUSH2:0:12}" <<< 
 check "... and still deploys" grep -qx "$PUSH2" "$WORKTREE/.deployed"
 
 PUSH_OWNER=$(commit "owner-specific token")
-{ cat push.env; echo "GIT_DEPLOY_GITHUB_TOKEN_TEST=owner-token"; } > push-owner.env
+{ cat push.env; echo "GIT_DEPLOY_GITHUB_TOKEN_TEST=owner-token"; echo "GIT_DEPLOY_LOG_BASE_URL_TEST=http://127.0.0.1:$API_PORT/owner-logs/"; } > push-owner.env
+owner_before=$(grep -c 'owner-logs/' statuses.txt || true)
 manual_push "$T/push-owner.env" > /dev/null
 check "owner-specific token wins over the default" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH_OWNER' | grep -q 'auth=owner-token\$'"
+check "owner-specific log URL wins over the default" test "$(grep -c 'owner-logs/' statuses.txt || true)" -gt "$owner_before"
+check "... and the default log URL isn't used for that owner" bash -c "! tail -n +\$(grep -n '$PUSH_OWNER' '$T/statuses.txt' | head -1 | cut -d: -f1) '$T/statuses.txt' | grep '/statuses ' | grep -v owner-logs | grep -q log_url"
 
 PUSH_DOWN=$(commit "GitHub unreachable")
 sed "s#^GIT_DEPLOY_GITHUB_API=.*#GIT_DEPLOY_GITHUB_API=http://127.0.0.1:$(free_port)#" push.env > push-down.env

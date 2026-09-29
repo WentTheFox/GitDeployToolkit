@@ -28,6 +28,9 @@ if [[ ! -f "$TOOLKIT_LIB/post-receive" ]]; then
   exit 1
 fi
 
+WORKTREE_EXISTED=0
+[[ -e "$WORKTREE" ]] && WORKTREE_EXISTED=1
+
 mkdir -p "$REPO_ROOT" "$WORKTREE"
 git init --quiet --bare "$BARE_REPO"
 
@@ -50,9 +53,18 @@ chmod +x "$TOOLKIT_LIB/post-receive"
 # the one actually running the app, so the restart silently no-ops.
 # Chown to $SUDO_USER (the person who ran sudo) so pushes/deploys happen
 # as the actual app owner instead.
+# An already-existing worktree (migrating a live app) is left alone: it
+# can hold deliberately www-data-owned/grouped dirs (storage/, uploads)
+# that a recursive chown would take away from the web server.
 if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-  chown -R "$SUDO_USER:$SUDO_USER" "$BARE_REPO" "$WORKTREE"
-  echo "git-deploy-new: chowned $BARE_REPO and $WORKTREE to $SUDO_USER"
+  chown -R "$SUDO_USER:$SUDO_USER" "$BARE_REPO"
+  echo "git-deploy-new: chowned $BARE_REPO to $SUDO_USER"
+  if [[ "$WORKTREE_EXISTED" == 0 ]]; then
+    chown "$SUDO_USER:$SUDO_USER" "$WORKTREE"
+    echo "git-deploy-new: chowned new worktree $WORKTREE to $SUDO_USER"
+  else
+    echo "git-deploy-new: $WORKTREE already existed, left its ownership alone"
+  fi
 fi
 
 echo "git-deploy-new: created $BARE_REPO"

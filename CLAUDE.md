@@ -307,7 +307,9 @@ The root helper refuses jobs as root or outside `/etc/git-deploy/cron.users`
 (default deploy user + `www-data`), any env line but `SHELL`/`PATH`/empty
 `MAILTO`, and — the cron-specific one — any worktree already scheduled
 elsewhere, because jobs would run twice. `adopt` (root, by hand) moves the
-old crontab lines / `cron.<period>` scripts aside. A deleted `deploy.cron`
+old crontab lines / `cron.<period>` scripts aside. `@apps <app>[,<app>]` section lines scope jobs per target when one repo
+feeds several bare repos (prod + beta), default all; a target with nothing
+in scope installs nothing (`"cron":"none"`). A deleted `deploy.cron`
 leaves the installed file and warns (`"cron":"stale"`) each deploy. Host
 inventory of existing cron setups is in `servers.local.yml` under each
 host's `cron:`.

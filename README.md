@@ -371,7 +371,8 @@ schedule fields. Allow it once per server:
 deploy ALL=(root) NOPASSWD: /usr/local/lib/git-deploy/git-deploy-cron install *
 ```
 
-It also refuses to install while the same worktree is already scheduled
+A repo deployed to several targets scopes jobs with `@apps <app>` section lines
+(default: all targets). It also refuses to install while the same worktree is already scheduled
 elsewhere (a crontab, `/etc/crontab`, another `cron.d` file, an
 `/etc/cron.<period>/` script), since every job would run twice. To migrate
 an app's existing jobs: copy them into `deploy.cron`, then run `sudo

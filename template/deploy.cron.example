@@ -22,6 +22,11 @@
 #     /etc/crontab, another /etc/cron.d file, /etc/cron.<period>/): the jobs
 #     would run twice. Migrate them with `git-deploy-cron adopt` first.
 #
+# One repo deployed to several targets (production + beta)? Scope jobs with
+# section lines, e.g. `@apps myapp` before a job that must only run for the
+# bare repo named myapp (`@apps *` goes back to all). The default is ALL, so
+# scope anything that must not run on every target.
+#
 # Keep what a job *does* in the repo too (a script under scripts/), so the
 # line here is just when and as whom.
 

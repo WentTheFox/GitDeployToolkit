@@ -311,6 +311,23 @@ check "won't overwrite an unmanaged git-deploy-<app> file" bash -c "test '$out' 
 check "remove deletes a managed file" bash -c "'$PYTHON' '$CRH' remove crapp > /dev/null 2>&1 && ! test -e '$CRD/git-deploy-crapp'"
 check "remove refuses an unmanaged file" bash -c "! '$PYTHON' '$CRH' remove other > /dev/null 2>&1 && test -e '$CRD/git-deploy-other'"
 rm -f "$CRD/git-deploy-other"
+# one deploy.cron, several targets (prod + beta): @apps scopes the jobs that follow
+scoped_cron() { printf '@apps crapp\n10 0 * * * %s /bin/true\n@apps other\n20 0 * * * %s /bin/false\n@apps *\n30 0 * * * %s /bin/echo all\n' "$ME" "$ME" "$ME"; }
+rep=$(scoped_cron | cr report crapp "$CRW")
+check "@apps: the app's own and unscoped jobs are reported" test "$rep" = "[{\"schedule\":\"10 0 * * *\",\"user\":\"$ME\"},{\"schedule\":\"30 0 * * *\",\"user\":\"$ME\"}]"
+rep=$(scoped_cron | cr report other "$CRW")
+check "@apps: another app gets its own jobs, not crapp's" test "$rep" = "[{\"schedule\":\"20 0 * * *\",\"user\":\"$ME\"},{\"schedule\":\"30 0 * * *\",\"user\":\"$ME\"}]"
+check "@apps: the installed file keeps only this app's jobs" bash -c "printf '@apps crapp\n10 0 * * * $ME /bin/true\n@apps other\n20 0 * * * $ME /bin/false\n' | CRON_D='$CRD' GIT_DEPLOY_CRON_ROOTS='$T/crwww' GIT_DEPLOY_CRON_USERS='$ME' CRON_SYSTEM_FILE=/nonexistent CRON_PERIOD_DIRS=/nonexistent CRONTAB_BIN=/nonexistent '$PYTHON' '$CRH' install crapp '$CRW' > /dev/null 2>&1 && ! grep -qE '^[^#].*/bin/false' '$CRD/git-deploy-crapp' && ! grep -q '^@apps' '$CRD/git-deploy-crapp' && grep -q '^10 0' '$CRD/git-deploy-crapp' && grep -q '(not for this app) 20 0' '$CRD/git-deploy-crapp'"
+rm -f "$CRD/git-deploy-crapp"
+out=$(printf '@apps prodonly\n10 0 * * * %s /bin/true\n' "$ME" | cr install crapp "$CRW")
+check "@apps: no job for this app -> none, nothing installed" bash -c "test '$out' = none && test -z \"\$(ls '$CRD')\""
+good_cron | cr install crapp "$CRW" > /dev/null
+out=$(printf '@apps prodonly\n10 0 * * * %s /bin/true\n' "$ME" | cr install crapp "$CRW")
+check "@apps: no job for this app removes its managed file" bash -c "test '$out' = none && ! test -e '$CRD/git-deploy-crapp'"
+cron_refuses "an @apps line without names" "@apps
+10 0 * * * $ME /bin/true" "@apps needs"
+cron_refuses "an @apps line with a bad name" "@apps a.b
+10 0 * * * $ME /bin/true" "@apps needs"
 
 section "deploy.cron through the hook"
 export GIT_DEPLOY_CRON_SUDO="" # no sudo in the test; the helper runs as this user

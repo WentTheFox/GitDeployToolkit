@@ -23,6 +23,11 @@ from a repo, so this file is the security boundary. deploy.cron is in
     schedulers means every job runs twice. `adopt` (root, by hand) moves
     those aside first;
   - only overwrites files it created.
+A repo deployed to more than one target (production and beta, one bare repo
+each) scopes jobs with `@apps <app>[,<app>...]` section lines: the jobs that
+follow apply only to those apps (`@apps *` goes back to all). The default
+is all, so scope anything that must not run everywhere — a target with no
+applicable job gets no file ("none").
 It never runs a job and never edits a crontab, except `adopt` when asked.
 
 stdout: one word, installed | unchanged | refused (report: a JSON list of
@@ -115,18 +120,26 @@ def check_field(text, lo, hi, names, label):
 
 
 def parse(text, app, worktree):
-    """Return jobs: [{schedule, user, command, line}]. Raises Refused."""
+    """Return (jobs for this app, skipped line numbers, @apps line numbers). Raises Refused."""
     text = text.replace("@WORKTREE@", worktree).replace("@APP@", app)
     m = re.search(r"@[A-Z_]+@", text)
     if m:
         raise Refused("unknown placeholder %s" % m.group(0))
-    users, jobs = allowed_users(), []
+    users, jobs, skipped, directives = allowed_users(), [], set(), set()
+    scope, total = None, 0  # scope None = every app
     for no, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if len(line) > MAX_LINE or "\x00" in line:
             raise Refused("line %d: too long or binary" % no)
+        if line.split()[0] == "@apps":
+            names = line.split(None, 1)[1].replace(" ", "").split(",") if len(line.split()) > 1 else []
+            if not names or any(n != "*" and not APP_RE.match(n) for n in names):
+                raise Refused("line %d: @apps needs app names (or *)" % no)
+            scope = None if "*" in names else names
+            directives.add(no)
+            continue
         env = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
         if env:
             key, val = env.group(1), env.group(2).strip()
@@ -163,12 +176,16 @@ def parse(text, app, worktree):
             raise Refused("line %d: no such user %r" % (no, user))
         if not command.strip():
             raise Refused("line %d: empty command" % no)
+        total += 1
+        if scope is not None and app not in scope:
+            skipped.add(no)
+            continue
         jobs.append({"schedule": schedule, "user": user, "command": command.strip(), "line": no})
-    if not jobs:
+    if not total:
         raise Refused("no jobs")
     if len(jobs) > MAX_JOBS:
         raise Refused("more than %d jobs" % MAX_JOBS)
-    return jobs
+    return jobs, skipped, directives
 
 
 def crontab_lines(user):
@@ -217,8 +234,10 @@ def cmd_report_or_install(mode, app, worktree):
                       "cron ignores /etc/cron.d files with a dot in the name)" % app)
     worktree = check_worktree(worktree)
     text = sys.stdin.read()
-    jobs = parse(text, app, worktree)
+    jobs, skipped, directives = parse(text, app, worktree)
     if mode == "report":
+        if not jobs:
+            say("no jobs for this app")
         # One line per job, worktree path included: the caller's public log
         # masks it like any other server path. stdout is the same schedule
         # data as JSON, recorded in deploy.jsonl.
@@ -230,14 +249,26 @@ def cmd_report_or_install(mode, app, worktree):
     target = os.path.join(CRON_D, name)
     if os.path.exists(target) and not open(target).readline().startswith(MARKER):
         raise Refused("%s exists and is not managed by git-deploy" % target)
+    if not jobs:
+        # The repo scopes every job to other apps: nothing for this one to run.
+        if os.path.exists(target):
+            os.unlink(target)
+            say("removed %s: this repo has no jobs for this app" % target)
+        print("none")
+        return
     dupes = other_schedulers(worktree, target)
     if dupes:
         raise Refused("already scheduled elsewhere, jobs would run twice: %s; adopt it first "
                       "(git-deploy-cron adopt %s %s)" % (
                           "; ".join("%s (%d line%s)" % (d, n, "" if n == 1 else "s") for d, n in dupes),
                           app, worktree))
+    body = []
+    for no, raw in enumerate(text.replace("@WORKTREE@", worktree).replace("@APP@", app).splitlines(), 1):
+        # cron can't read @apps lines, and jobs for other apps must not run here
+        body.append("# %s" % raw if no in directives else
+                    "# (not for this app) %s" % raw if no in skipped else raw)
     content = "%s — edit deploy.cron in the app's repo, not this file\n# app: %s\n%s" % (
-        MARKER, app, text.replace("@WORKTREE@", worktree).replace("@APP@", app))
+        MARKER, app, "\n".join(body))
     if not content.endswith("\n"):
         content += "\n"
     if os.path.exists(target) and open(target).read() == content:

@@ -51,6 +51,18 @@ supplies lines that cron executes, so the helper:
 - only overwrites files it created, and installs atomically (temp name
   with a dot, which cron ignores, then rename).
 
+## One repo, several targets (production + beta)
+
+A repo deployed to more than one bare repo (the SledgeHammerTime shape)
+shares one `deploy.cron`, so by default each target would install every
+job — including a scheduler on a beta that points at production data. Scope
+jobs with section lines: `@apps sledgehammertime` makes the jobs that follow
+apply only to that app (comma-separated for several; `@apps *` returns to
+all). The default is all, so scope anything that must not run everywhere. A
+target left with no applicable job installs nothing (`"cron":"none"`) and
+removes a managed file it had. In the installed file `@apps` lines and
+jobs for other apps are kept as comments.
+
 ## Not running every job twice
 
 Two schedulers for one worktree means every job fires twice — worse than

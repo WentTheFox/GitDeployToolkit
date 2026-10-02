@@ -133,6 +133,42 @@ while read -r oldrev newrev ref; do
     echo "git-deploy: logrotate: no deploy.logrotate, log retention is not managed by this repo"
   fi
 
+  # Opt-in scheduled jobs: an app that commits deploy.cron gets it validated
+  # and installed as /etc/cron.d/git-deploy-<app> by a root helper (a job
+  # never runs as root, and never while the same worktree is scheduled
+  # elsewhere). Same contract as deploy.logrotate above: best effort, never
+  # fails the deploy, every deploy states what is scheduled (and the lines
+  # are part of the public summary log), the outcome goes to deploy.jsonl.
+  # See docs/cron.md.
+  CRON_STATUS="absent"
+  CRON_JOBS="[]"
+  CRON_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-cron"
+  CRON_INSTALLED="${CRON_D:-/etc/cron.d}/git-deploy-$LOGROTATE_APP"
+  if [[ -f "$WORKTREE/deploy.cron" && ! -L "$WORKTREE/deploy.cron" ]]; then
+    if [[ ! -x "$CRON_HELPER" ]]; then
+      CRON_STATUS="unavailable"
+      echo "git-deploy: cron: helper not installed, deploy.cron not checked — continuing" >&2
+    elif ! CRON_JOBS=$("$CRON_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.cron"); then
+      CRON_STATUS="refused"
+      CRON_JOBS="[]"
+      echo "git-deploy: cron: deploy.cron not installed (refused) — continuing" >&2
+    else
+      # GIT_DEPLOY_CRON_SUDO="" lets the tests (and a root deploy user) skip sudo.
+      # shellcheck disable=SC2086
+      if CRON_STATUS=$(${GIT_DEPLOY_CRON_SUDO-sudo -n} "$CRON_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.cron"); then
+        echo "git-deploy: cron: schedule $CRON_STATUS"
+      else
+        [[ "$CRON_STATUS" == refused ]] || CRON_STATUS="unavailable"
+        echo "git-deploy: cron: deploy.cron not installed ($CRON_STATUS) — continuing" >&2
+      fi
+    fi
+  elif [[ -e "$CRON_INSTALLED" ]]; then
+    CRON_STATUS="stale"
+    echo "git-deploy: cron: $CRON_INSTALLED is still installed but this repo has no deploy.cron any more — its jobs keep running until removed (git-deploy-cron remove $LOGROTATE_APP)" >&2
+  else
+    echo "git-deploy: cron: no deploy.cron, scheduled jobs are not managed by this repo"
+  fi
+
   DEPLOY_STATUS="success"
   APP_CONF="$WORKTREE/deploy.conf"
   if [[ -f "$APP_CONF" ]]; then
@@ -178,7 +214,7 @@ while read -r oldrev newrev ref; do
   fi
 
   DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
-  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\",\"retention\":$LOGROTATE_RETENTION"
+  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\",\"retention\":$LOGROTATE_RETENTION,\"cron\":\"$CRON_STATUS\",\"cron_jobs\":$CRON_JOBS"
   NOTIFY_PENDING=""
   notify "$DEPLOY_STATUS" "$DEPLOY_DURATION"
 

@@ -295,6 +295,23 @@ The per-server inventory of existing logrotate setups and every log file
 per project is in `servers.local.yml` under each host's `logrotate:` — read
 that before migrating an app.
 
+## Optional: per-repo scheduled jobs (2026-10-02)
+
+Mirror of the logrotate feature for cron: an app may commit `deploy.cron`
+(cron.d syntax, user field required; template `template/deploy.cron.example`,
+design `docs/cron.md`, usage README "Scheduled jobs"). The hook reports it
+(no root), then installs it via `sudo -n git-deploy-cron install` as
+`/etc/cron.d/git-deploy-<app>`; warn-only like logrotate, outcome in
+`deploy.jsonl` as `cron` / `cron_jobs`, schedule lines in the public log.
+The root helper refuses jobs as root or outside `/etc/git-deploy/cron.users`
+(default deploy user + `www-data`), any env line but `SHELL`/`PATH`/empty
+`MAILTO`, and — the cron-specific one — any worktree already scheduled
+elsewhere, because jobs would run twice. `adopt` (root, by hand) moves the
+old crontab lines / `cron.<period>` scripts aside. A deleted `deploy.cron`
+leaves the installed file and warns (`"cron":"stale"`) each deploy. Host
+inventory of existing cron setups is in `servers.local.yml` under each
+host's `cron:`.
+
 ## Pitfalls hit during the first real migration (fantastick)
 
 - **Bare repo ownership.** `git-deploy-new` needs root (it writes under

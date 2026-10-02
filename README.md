@@ -265,7 +265,7 @@ server to check without asking:
 
 ```json
 {"event":"start","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea..."}
-{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4,"logrotate":"absent","retention":[]}
+{"event":"complete","time":"2026-09-18T09:59:15Z","branch":"main","commit":"a621a11...","prev_commit":"06909ea...","status":"success","duration_s":4,"logrotate":"absent","retention":[],"cron":"absent","cron_jobs":[]}
 ```
 
 `status` is `success` or `failed` (`deploy_build`/`deploy_restart`
@@ -348,6 +348,39 @@ delete` + start. Adopting an app that already has a hand-made file in
 refuses, since logrotate errors on a log listed twice). `git-deploy-logrotate
 report <app> <worktree> < deploy.logrotate` prints each log's retention in
 days without installing anything. Design notes: `docs/logrotate.md`.
+
+## Scheduled jobs (optional)
+
+Same idea for cron: an app commits `deploy.cron` (template:
+`template/deploy.cron.example`) in `/etc/cron.d` syntax, so every job names
+the user it runs as. Each deploy installs it as
+`/etc/cron.d/git-deploy-<app>` (cron picks it up by itself; the toolkit
+never runs a job), prints one `git-deploy: cron: <schedule> as <user>:
+<command>` line per job — part of the public deployment log, worktree
+masked — and records `"cron"` and `"cron_jobs"` in `deploy.jsonl`. An app
+without the file is not touched; a refused or uninstallable file only warns.
+
+The helper (`git-deploy-cron`, installed by `install.sh`) runs as root via
+sudo, so it refuses anything unsafe: jobs as root or as a user outside
+`/etc/git-deploy/cron.users` (default: the deploy user and `www-data`),
+environment lines other than `SHELL`, `PATH` and an empty `MAILTO`, bad
+schedule fields. Allow it once per server:
+
+```
+# /etc/sudoers.d/git-deploy-cron  (mode 0440)
+deploy ALL=(root) NOPASSWD: /usr/local/lib/git-deploy/git-deploy-cron install *
+```
+
+It also refuses to install while the same worktree is already scheduled
+elsewhere (a crontab, `/etc/crontab`, another `cron.d` file, an
+`/etc/cron.<period>/` script), since every job would run twice. To migrate
+an app's existing jobs: copy them into `deploy.cron`, then run `sudo
+git-deploy-cron adopt <app> <worktree>` (backs the old entries up to
+`/root/cron.pre-toolkit/` and removes them), then deploy. If `deploy.cron`
+is later removed from the repo the installed file stays and each deploy
+warns until `sudo git-deploy-cron remove <app>`. `git-deploy-cron report
+<app> <worktree> < deploy.cron` prints the schedule without installing.
+Design notes: `docs/cron.md`.
 
 ## sudo for restarts
 

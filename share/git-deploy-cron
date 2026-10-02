@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Install an app's own scheduled jobs (deploy.cron) for the shared
+post-receive hook. See docs/cron.md.
+
+  git-deploy-cron install <app> <worktree>  < deploy.cron
+  git-deploy-cron report  <app> <worktree>  < deploy.cron   (no root needed;
+                                                  prints each job's schedule)
+  git-deploy-cron remove  <app>
+  git-deploy-cron adopt   <app> <worktree>                  (root, by hand)
+
+`install` runs as root (via a narrow sudoers rule) and the content comes
+from a repo, so this file is the security boundary. deploy.cron is in
+/etc/cron.d syntax, so every job names the user it runs as. The helper:
+  - never lets a job run as root, and only as a user on the allow list
+    (/etc/git-deploy/cron.users, one per line; default: the deploy user who
+    invoked sudo, plus www-data — the users deploy.conf already acts as);
+  - accepts only SHELL, PATH and an *empty* MAILTO as environment lines (a
+    repo must not be able to mail job output to an address of its choosing);
+  - validates every schedule field itself, and caps lines and job count;
+  - refuses to install while the same worktree is already scheduled
+    somewhere else (root's or an allowed user's crontab, /etc/crontab,
+    another /etc/cron.d file, /etc/cron.<period>/ scripts), because two
+    schedulers means every job runs twice. `adopt` (root, by hand) moves
+    those aside first;
+  - only overwrites files it created.
+It never runs a job and never edits a crontab, except `adopt` when asked.
+
+stdout: one word, installed | unchanged | refused (report: a JSON list of
+{schedule, user} instead). stderr: human-readable lines. Exit 0 unless
+refused (1) or misused (2).
+
+Test/override knobs (ignored by sudo's env_reset in production):
+  CRON_D, CRONTAB_BIN, CRON_SYSTEM_FILE, CRON_PERIOD_DIRS (colon list),
+  GIT_DEPLOY_CRON_USERS (colon list), GIT_DEPLOY_CRON_ROOTS (colon list),
+  GIT_DEPLOY_CRON_BACKUP.
+"""
+import datetime, json, os, pwd, re, shutil, subprocess, sys
+
+CRON_D = os.environ.get("CRON_D", "/etc/cron.d")
+CRONTAB_BIN = os.environ.get("CRONTAB_BIN", "crontab")
+SYSTEM_FILE = os.environ.get("CRON_SYSTEM_FILE", "/etc/crontab")
+PERIOD_DIRS = os.environ.get("CRON_PERIOD_DIRS",
+                             "/etc/cron.hourly:/etc/cron.daily:/etc/cron.weekly:/etc/cron.monthly").split(":")
+BACKUP_DIR = os.environ.get("GIT_DEPLOY_CRON_BACKUP", "/root/cron.pre-toolkit")
+ROOTS_FILE = "/etc/git-deploy/cron.roots"
+USERS_FILE = "/etc/git-deploy/cron.users"
+DEFAULT_ROOTS = ["/var/www", "/var/node"]
+MARKER = "# managed by git-deploy"
+# /etc/cron.d silently ignores a file whose name contains a dot.
+APP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+PATH_RE = re.compile(r"^/[A-Za-z0-9._/+-]*$")
+MACROS = {"@reboot", "@hourly", "@daily", "@midnight", "@weekly", "@monthly", "@yearly", "@annually"}
+MAX_JOBS, MAX_LINE = 50, 900
+FIELDS = [("minute", 0, 59, None), ("hour", 0, 23, None), ("day of month", 1, 31, None),
+          ("month", 1, 12, "jan feb mar apr may jun jul aug sep oct nov dec".split()),
+          ("day of week", 0, 7, "sun mon tue wed thu fri sat".split())]
+ITEM_RE = re.compile(r"^(\*|[0-9]+(-[0-9]+)?|[a-z]{3}(-[a-z]{3})?)(/[0-9]+)?$")
+
+
+class Refused(Exception):
+    pass
+
+
+def say(msg):
+    print("git-deploy: cron: " + msg, file=sys.stderr)
+
+
+def allowed_roots():
+    env = os.environ.get("GIT_DEPLOY_CRON_ROOTS")
+    if env:
+        roots = env.split(":")
+    elif os.path.isfile(ROOTS_FILE):
+        roots = [l.strip() for l in open(ROOTS_FILE) if l.strip() and not l.startswith("#")]
+    else:
+        roots = DEFAULT_ROOTS
+    return [os.path.realpath(r) for r in roots]
+
+
+def allowed_users():
+    env = os.environ.get("GIT_DEPLOY_CRON_USERS")
+    if env:
+        users = env.split(":")
+    elif os.path.isfile(USERS_FILE):
+        users = [l.strip() for l in open(USERS_FILE) if l.strip() and not l.startswith("#")]
+    else:
+        sudo_user = os.environ.get("SUDO_USER", "")
+        users = ([sudo_user] if sudo_user and sudo_user != "root" else []) + ["www-data"]
+    return [u for u in users if u != "root"]
+
+
+def check_worktree(worktree):
+    if not PATH_RE.match(worktree) or ".." in worktree.split("/"):
+        raise Refused("unsafe worktree path")
+    real = os.path.realpath(worktree)
+    if not any(real.startswith(r.rstrip("/") + "/") for r in allowed_roots()):
+        raise Refused("worktree is not inside an allowed root (%s)" % ", ".join(allowed_roots()))
+    return real
+
+
+def check_field(text, lo, hi, names, label):
+    for item in text.split(","):
+        if not ITEM_RE.match(item.lower()):
+            raise Refused("bad %s field %r" % (label, text))
+        base, _, step = item.partition("/")
+        if step and int(step) == 0:
+            raise Refused("bad %s step in %r" % (label, text))
+        if base == "*":
+            continue
+        for part in base.lower().split("-"):
+            if part.isdigit():
+                if not lo <= int(part) <= hi:
+                    raise Refused("%s %s is out of range (%d-%d)" % (label, part, lo, hi))
+            elif not names or part not in names:
+                raise Refused("bad %s name %r" % (label, part))
+
+
+def parse(text, app, worktree):
+    """Return jobs: [{schedule, user, command, line}]. Raises Refused."""
+    text = text.replace("@WORKTREE@", worktree).replace("@APP@", app)
+    m = re.search(r"@[A-Z_]+@", text)
+    if m:
+        raise Refused("unknown placeholder %s" % m.group(0))
+    users, jobs = allowed_users(), []
+    for no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(line) > MAX_LINE or "\x00" in line:
+            raise Refused("line %d: too long or binary" % no)
+        env = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+        if env:
+            key, val = env.group(1), env.group(2).strip()
+            if key == "SHELL" and val in ("/bin/sh", "/bin/bash"):
+                continue
+            if key == "PATH" and re.match(r"^[A-Za-z0-9_./:+-]+$", val):
+                continue
+            if key == "MAILTO" and val in ("", '""', "''"):
+                continue
+            raise Refused("line %d: environment line %s is not allowed (only SHELL, PATH, "
+                          "and an empty MAILTO)" % (no, key))
+        if line.startswith("@"):
+            parts = line.split(None, 2)
+            if len(parts) < 3 or parts[0] not in MACROS:
+                raise Refused("line %d: bad schedule" % no)
+            schedule, user, command = parts[0], parts[1], parts[2]
+        else:
+            parts = line.split(None, 6)
+            if len(parts) < 7:
+                raise Refused("line %d: expected 5 schedule fields, a user and a command" % no)
+            for value, (label, lo, hi, names) in zip(parts[:5], FIELDS):
+                try:
+                    check_field(value, lo, hi, names, label)
+                except Refused as e:
+                    raise Refused("line %d: %s" % (no, e))
+            schedule, user, command = " ".join(parts[:5]), parts[5], parts[6]
+        if user == "root":
+            raise Refused("line %d: jobs must not run as root" % no)
+        if user not in users:
+            raise Refused("line %d: user %r is not allowed (allowed: %s)" % (no, user, ", ".join(users) or "none"))
+        try:
+            pwd.getpwnam(user)
+        except KeyError:
+            raise Refused("line %d: no such user %r" % (no, user))
+        if not command.strip():
+            raise Refused("line %d: empty command" % no)
+        jobs.append({"schedule": schedule, "user": user, "command": command.strip(), "line": no})
+    if not jobs:
+        raise Refused("no jobs")
+    if len(jobs) > MAX_JOBS:
+        raise Refused("more than %d jobs" % MAX_JOBS)
+    return jobs
+
+
+def crontab_lines(user):
+    try:
+        r = subprocess.run([CRONTAB_BIN, "-u", user, "-l"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return []
+    return r.stdout.splitlines() if r.returncode == 0 else []
+
+
+def mentions(line, worktree):
+    s = line.strip()
+    return bool(s) and not s.startswith("#") and (worktree + "/" in s or s.endswith(worktree) or worktree + " " in s)
+
+
+def other_schedulers(worktree, own_file):
+    """Where else is this worktree already scheduled? [(description, count)]"""
+    found = []
+
+    def scan(desc, lines):
+        n = sum(1 for l in lines if mentions(l, worktree))
+        if n:
+            found.append((desc, n))
+
+    for user in ["root"] + allowed_users():
+        scan("%s's crontab" % user, crontab_lines(user))
+    if os.path.isfile(SYSTEM_FILE):
+        scan(SYSTEM_FILE, open(SYSTEM_FILE, errors="replace").read().splitlines())
+    if os.path.isdir(CRON_D):
+        for name in sorted(os.listdir(CRON_D)):
+            p = os.path.join(CRON_D, name)
+            if p != own_file and os.path.isfile(p):
+                scan(p, open(p, errors="replace").read().splitlines())
+    for d in PERIOD_DIRS:
+        if os.path.isdir(d):
+            for name in sorted(os.listdir(d)):
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    scan(p, open(p, errors="replace").read().splitlines())
+    return found
+
+
+def cmd_report_or_install(mode, app, worktree):
+    if not APP_RE.match(app):
+        raise Refused("app name %r can't be used (letters, digits, - and _ only; "
+                      "cron ignores /etc/cron.d files with a dot in the name)" % app)
+    worktree = check_worktree(worktree)
+    text = sys.stdin.read()
+    jobs = parse(text, app, worktree)
+    if mode == "report":
+        # One line per job, worktree path included: the caller's public log
+        # masks it like any other server path. stdout is the same schedule
+        # data as JSON, recorded in deploy.jsonl.
+        for j in jobs:
+            say("%s as %s: %s" % (j["schedule"], j["user"], j["command"][:120]))
+        print(json.dumps([{"schedule": j["schedule"], "user": j["user"]} for j in jobs], separators=(",", ":")))
+        return
+    name = "git-deploy-%s" % app
+    target = os.path.join(CRON_D, name)
+    if os.path.exists(target) and not open(target).readline().startswith(MARKER):
+        raise Refused("%s exists and is not managed by git-deploy" % target)
+    dupes = other_schedulers(worktree, target)
+    if dupes:
+        raise Refused("already scheduled elsewhere, jobs would run twice: %s; adopt it first "
+                      "(git-deploy-cron adopt %s %s)" % (
+                          "; ".join("%s (%d line%s)" % (d, n, "" if n == 1 else "s") for d, n in dupes),
+                          app, worktree))
+    content = "%s — edit deploy.cron in the app's repo, not this file\n# app: %s\n%s" % (
+        MARKER, app, text.replace("@WORKTREE@", worktree).replace("@APP@", app))
+    if not content.endswith("\n"):
+        content += "\n"
+    if os.path.exists(target) and open(target).read() == content:
+        print("unchanged")
+        return
+    tmp = os.path.join(CRON_D, "%s.new" % name)  # cron ignores names with a dot
+    with open(tmp, "w") as f:
+        f.write(content)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, target)
+    print("installed")
+
+
+def cmd_remove(app):
+    target = os.path.join(CRON_D, "git-deploy-%s" % app)
+    if not APP_RE.match(app) or not os.path.exists(target):
+        raise Refused("nothing to remove")
+    if not open(target).readline().startswith(MARKER):
+        raise Refused("not managed by git-deploy")
+    os.unlink(target)
+    print("ok")
+
+
+def cmd_adopt(app, worktree):
+    """Take this worktree's jobs out of root's and the allowed users' crontabs
+    and out of /etc/cron.<period>/ so deploy.cron can own them. Backs
+    everything up first and prints what it removed."""
+    if not APP_RE.match(app):
+        raise Refused("bad app name")
+    worktree = check_worktree(worktree)
+    stamp = datetime.date.today().isoformat()
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    moved = 0
+    for user in ["root"] + allowed_users():
+        lines = crontab_lines(user)
+        keep = [l for l in lines if not mentions(l, worktree)]
+        gone = [l for l in lines if mentions(l, worktree)]
+        if not gone:
+            continue
+        backup = os.path.join(BACKUP_DIR, "crontab.%s.%s" % (user, stamp))
+        with open(backup, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        r = subprocess.run([CRONTAB_BIN, "-u", user, "-"], input="\n".join(keep) + "\n", text=True)
+        if r.returncode != 0:
+            raise Refused("could not rewrite %s's crontab (backup kept at %s)" % (user, backup))
+        for l in gone:
+            say("removed from %s's crontab: %s" % (user, l))
+        moved += len(gone)
+    for d in PERIOD_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for fname in sorted(os.listdir(d)):
+            p = os.path.join(d, fname)
+            if os.path.isfile(p) and any(mentions(l, worktree) for l in open(p, errors="replace").read().splitlines()):
+                shutil.move(p, os.path.join(BACKUP_DIR, "%s.%s.%s" % (os.path.basename(d), fname, stamp)))
+                say("moved %s to %s" % (p, BACKUP_DIR))
+                moved += 1
+    say("adopted %d entr%s for %s, backups in %s; add them to deploy.cron" % (
+        moved, "y" if moved == 1 else "ies", worktree, BACKUP_DIR))
+    print("ok")
+
+
+def main(argv):
+    try:
+        if len(argv) == 4 and argv[1] in ("install", "report"):
+            cmd_report_or_install(argv[1], argv[2], argv[3])
+        elif len(argv) == 3 and argv[1] == "remove":
+            cmd_remove(argv[2])
+        elif len(argv) == 4 and argv[1] == "adopt":
+            cmd_adopt(argv[2], argv[3])
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except Refused as e:
+        say("refused (%s)" % e)
+        print("refused")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

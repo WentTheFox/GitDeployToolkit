@@ -1,0 +1,40 @@
+# deploy.cron — this app's scheduled jobs, versioned with the code.
+# Copy to the repo root as `deploy.cron`. Opt-in: an app without this file
+# is left exactly as it is.
+#
+# On every deploy the toolkit validates this and installs it as
+# /etc/cron.d/git-deploy-<app>; cron picks the file up by itself. Nothing
+# is ever run by the toolkit. Every deploy prints each job's schedule and
+# user, and records them in deploy.jsonl, so what runs when is part of the
+# deploy history.
+#
+# /etc/cron.d syntax, so every job names the user it runs as (the sixth
+# field). Placeholders:
+#   @WORKTREE@  this deploy's worktree (differs between e.g. prod and beta)
+#   @APP@       the bare repo's name, without .git
+#
+# Deliberately NOT allowed (the install is refused, the deploy carries on):
+#   - jobs as root, or as a user that is not on the server's allow list
+#     (default: the deploy user and www-data — who deploy.conf already acts as)
+#   - environment lines other than SHELL, PATH and an *empty* MAILTO (job
+#     output must not be mailable to an address the repo picks)
+#   - a worktree that is already scheduled somewhere else (a crontab,
+#     /etc/crontab, another /etc/cron.d file, /etc/cron.<period>/): the jobs
+#     would run twice. Migrate them with `git-deploy-cron adopt` first.
+#
+# Keep what a job *does* in the repo too (a script under scripts/), so the
+# line here is just when and as whom.
+
+# Silence cron's mail; send job output to a log (rotated by deploy.logrotate)
+# or let the job log for itself.
+MAILTO=""
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Laravel scheduler: the schedule itself lives in routes/console.php, which
+# is already versioned; this is only the once-a-minute trigger.
+* * * * * deploy cd @WORKTREE@ && php artisan schedule:run >> /dev/null 2>&1
+
+# A privacy-relevant clean-up, with the reason next to it: logged IP
+# addresses are discarded after 14 days (see the privacy policy), so this
+# job is the retention mechanism and belongs in source control.
+10 0 * * * www-data php -f @WORKTREE@/scripts/clear_old_logged_ips.php

@@ -54,6 +54,7 @@ for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
+check "git-deploy-cron parses" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-cron"
 check "hooks.json is valid JSON once templated" \
   "$PYTHON" -c 'import json,sys; json.loads(open(sys.argv[1]).read().replace("{{ getenv \"GIT_DEPLOY_WEBHOOK_SECRET\" }}","x"))' "$ROOT/share/webhook-hooks.json"
 for f in "$ROOT"/template/*.yml.example; do
@@ -250,6 +251,111 @@ $(good_def)" "outside the worktree"
   (cd dev && git push -q "$BARE" main > /dev/null 2>&1) || true
 fi
 
+# --- cron definitions ---------------------------------------------------
+
+section "deploy.cron helper"
+CRH="$ROOT/share/git-deploy-cron"
+CRD="$T/cron.d"; CRW="$T/crwww/crapp"; mkdir -p "$CRD" "$CRW" "$T/cron-hourly" "$T/fake-crontabs"
+cat > "$T/fakecrontab" <<'EOF2'
+#!/usr/bin/env bash
+# fakecrontab -u USER -l | fakecrontab -u USER -   (per-user files in $FAKE_CRONTAB_DIR)
+f="$FAKE_CRONTAB_DIR/$2"
+case "$3" in -l) [[ -f "$f" ]] && cat "$f" || exit 1 ;; -) cat > "$f" ;; esac
+EOF2
+chmod +x "$T/fakecrontab"
+export CRON_D="$CRD" GIT_DEPLOY_CRON_ROOTS="$T/crwww" GIT_DEPLOY_CRON_USERS="$ME" CRON_SYSTEM_FILE="$T/etc-crontab" \
+  CRON_PERIOD_DIRS="$T/cron-hourly" CRONTAB_BIN="$T/fakecrontab" FAKE_CRONTAB_DIR="$T/fake-crontabs" GIT_DEPLOY_CRON_BACKUP="$T/cronbackup"
+cr() { "$PYTHON" "$CRH" "$@" 2> cr.err; } # cr <cmd> ... < definition ; stdout = status word
+good_cron() { printf '# purge\nMAILTO=""\n10 0 * * *\t%s\tcd @WORKTREE@ && php -f scripts/a.php\n*/15 8-18 * 1-6 mon-fri %s /bin/true\n@daily %s echo hi\n' "$ME" "$ME" "$ME"; }
+cron_refuses() { # cron_refuses <description> <definition-text> <error substring>
+  local out; out=$(printf '%s\n' "$2" | cr install crapp "$CRW" || true)
+  if [[ "$out" == refused && ! -e "$CRD/git-deploy-crapp" ]] && grep -q -- "$3" cr.err; then ok "refuses $1"; else not_ok "refuses $1" "$(cat cr.err) [out=$out]"; fi
+}
+rep=$(good_cron | cr report crapp "$CRW")
+check "report prints each job" grep -qF "cron: 10 0 * * * as $ME: cd $CRW && php -f scripts/a.php" cr.err
+check "report gives JSON schedule+user" test "$rep" = "[{\"schedule\":\"10 0 * * *\",\"user\":\"$ME\"},{\"schedule\":\"*/15 8-18 * 1-6 mon-fri\",\"user\":\"$ME\"},{\"schedule\":\"@daily\",\"user\":\"$ME\"}]"
+check "report installs nothing" test -z "$(ls "$CRD")"
+check "installs a valid definition" test "$(good_cron | cr install crapp "$CRW")" = installed
+check "installed file is marked, 0644, expanded" bash -c "head -1 '$CRD/git-deploy-crapp' | grep -q '^# managed by git-deploy' && test \"\$(stat -c %a '$CRD/git-deploy-crapp')\" = 644 && grep -q 'cd $CRW && php' '$CRD/git-deploy-crapp'"
+check "same definition again -> unchanged" test "$(good_cron | cr install crapp "$CRW")" = unchanged
+check "no stray temp file left (cron would read it)" test "$(ls "$CRD")" = git-deploy-crapp
+rm -f "$CRD/git-deploy-crapp"
+cron_refuses "a job as root" "0 0 * * * root /bin/true" "must not run as root"
+cron_refuses "a user off the allow list" "0 0 * * * nobody /bin/true" "not allowed"
+cron_refuses "a minute out of range" "61 0 * * * $ME /bin/true" "out of range"
+cron_refuses "a bad month name" "0 0 * foo * $ME /bin/true" "bad month"
+cron_refuses "a zero step" "*/0 0 * * * $ME /bin/true" "step"
+cron_refuses "an unknown macro" "@sometimes $ME /bin/true" "bad schedule"
+cron_refuses "a job without a command" "0 0 * * * $ME" "expected 5 schedule fields"
+cron_refuses "mail to an address" "MAILTO=a@b.example
+0 0 * * * $ME /bin/true" "MAILTO is not allowed"
+cron_refuses "LD_PRELOAD-style env lines" "LD_PRELOAD=/tmp/x.so
+0 0 * * * $ME /bin/true" "LD_PRELOAD is not allowed"
+cron_refuses "a file with no jobs" "# nothing here" "no jobs"
+cron_refuses "an unknown placeholder" "0 0 * * * $ME @NOPE@/x" "placeholder"
+check "refuses a worktree outside the allowed roots" bash -c "printf '0 0 * * * $ME /bin/true\n' | GIT_DEPLOY_CRON_ROOTS='$T/elsewhere' '$PYTHON' '$CRH' install crapp '$CRW' 2>&1 | grep -q 'allowed root'"
+check "refuses an app name with a dot (cron ignores such files)" bash -c "printf '0 0 * * * $ME /bin/true\n' | '$PYTHON' '$CRH' install my.app '$CRW' 2>&1 | grep -q 'dot'"
+# two schedulers = every job twice: refuse while the worktree is scheduled elsewhere, and never print the line
+printf '0 4 * * * /usr/bin/sudo -u www-data php -f %s/scripts/x.php --token=SECRETCANARY\n30 1 * * * /bin/true\n' "$CRW" > "$T/fake-crontabs/root"
+out=$(good_cron | cr install crapp "$CRW" || true)
+if [[ "$out" == refused ]] && grep -q "root's crontab (1 line)" cr.err; then ok "refuses while root's crontab already schedules the worktree"; else not_ok "refuses while root's crontab already schedules the worktree" "$(cat cr.err)"; fi
+if grep -q SECRETCANARY cr.err; then not_ok "the refusal does not print the crontab line" "$(cat cr.err)"; else ok "the refusal does not print the crontab line"; fi
+printf '#!/bin/sh\nphp %s/artisan queue:work\n' "$CRW" > "$T/cron-hourly/app-worker.sh"
+out=$(good_cron | cr install crapp "$CRW" || true)
+check "also refuses for an /etc/cron.<period>/ script" grep -q "app-worker.sh (1 line)" cr.err
+check "adopt strips the lines and moves the script, with backups" bash -c "'$PYTHON' '$CRH' adopt crapp '$CRW' > /dev/null 2> '$T/adopt.err' && ! grep -q '$CRW' '$T/fake-crontabs/root' && grep -q '^30 1' '$T/fake-crontabs/root' && test -f '$T/cronbackup/crontab.root.'* && ! test -e '$T/cron-hourly/app-worker.sh' && grep -q SECRETCANARY '$T/adopt.err'"
+check "then the definition installs" test "$(good_cron | cr install crapp "$CRW")" = installed
+printf '# not ours\n' > "$CRD/git-deploy-other"
+out=$(good_cron | cr install other "$CRW" || true)
+check "won't overwrite an unmanaged git-deploy-<app> file" bash -c "test '$out' = refused && grep -q 'not managed' cr.err && test \"\$(cat '$CRD/git-deploy-other')\" = '# not ours'"
+check "remove deletes a managed file" bash -c "'$PYTHON' '$CRH' remove crapp > /dev/null 2>&1 && ! test -e '$CRD/git-deploy-crapp'"
+check "remove refuses an unmanaged file" bash -c "! '$PYTHON' '$CRH' remove other > /dev/null 2>&1 && test -e '$CRD/git-deploy-other'"
+rm -f "$CRD/git-deploy-other"
+
+section "deploy.cron through the hook"
+export GIT_DEPLOY_CRON_SUDO="" # no sudo in the test; the helper runs as this user
+export GIT_DEPLOY_CRON_ROOTS="$T/www:$T/crwww"
+rm -f "$T/fake-crontabs/root"
+# FAILME is committed from the failure test earlier; lift it so "deploy still succeeded" means something
+commit "unbreak restart for cron" rm > /dev/null
+printf 'MAILTO=""\n10 0 * * * %s php -f @WORKTREE@/scripts/clear.php\n' "$ME" > "$WORKTREE/deploy.cron"
+commit "with cron" > /dev/null
+out=$(cd dev && git push "$BARE" main 2>&1)
+check "hook installs the app's schedule" grep -qF "php -f $WORKTREE/scripts/clear.php" "$CRD/git-deploy-app"
+check "deploy output states each job" grep -q "git-deploy: cron: 10 0 \* \* \* as $ME: php -f $WORKTREE/scripts/clear.php" <<< "$out"
+check "deploy.jsonl records cron=installed with the schedule" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"cron\":\"installed\",\"cron_jobs\":\\[{\"schedule\":\"10 0 \* \* \*\",\"user\":\"$ME\"}\\]'"
+check "deploy still succeeded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+printf '0 0 * * * root /bin/true\n' > "$WORKTREE/deploy.cron"
+rm -f "$CRD"/git-deploy-*
+commit "bad cron" > /dev/null
+out=$(cd dev && git push "$BARE" main 2>&1)
+check "refused definition only warns" grep -q "deploy.cron not installed (refused)" <<< "$out"
+check "refused definition doesn't fail the deploy" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"status\":\"success\"'"
+check "refusal is recorded, with no jobs" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"cron\":\"refused\",\"cron_jobs\":\\[\\]'"
+check "nothing installed on refusal" test -z "$(ls "$CRD")"
+printf '10 0 * * * %s /bin/true\n' "$ME" > "$WORKTREE/deploy.cron"
+commit "cron again" > /dev/null; (cd dev && git push -q "$BARE" main > /dev/null 2>&1)
+rm -f "$WORKTREE/deploy.cron"
+commit "drop cron" > /dev/null
+out=$(cd dev && git push "$BARE" main 2>&1)
+check "a removed deploy.cron leaves the file and warns" bash -c "test -e '$CRD/git-deploy-app' && grep -q 'no deploy.cron any more' <<< \"\$1\"" _ "$out"
+check "stale schedule is recorded" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"cron\":\"stale\"'"
+rm -f "$CRD"/git-deploy-*
+commit "no cron" > /dev/null
+out=$(cd dev && git push "$BARE" main 2>&1)
+check "no deploy.cron -> says so" grep -q "cron: no deploy.cron" <<< "$out"
+check "no deploy.cron -> absent, nothing installed" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"cron\":\"absent\"' && test -z \"\$(ls '$CRD')\""
+# sudo unusable: not installed, but the schedule is still reported and recorded
+printf '10 0 * * * %s php -f @WORKTREE@/scripts/clear.php\n' "$ME" > "$WORKTREE/deploy.cron"
+commit "no sudo cron" > /dev/null
+out=$(cd dev && GIT_DEPLOY_CRON_SUDO=/nonexistent-sudo git push "$BARE" main 2>&1)
+check "no usable sudo -> unavailable, deploy goes on" bash -c "tail -1 '$BARE/deploy.jsonl' | grep -q '\"cron\":\"unavailable\"' && test -z \"\$(ls '$CRD')\""
+check "no usable sudo -> schedule still reported" grep -q "cron: 10 0 \* \* \* as $ME" <<< "$out"
+# leave the valid untracked definition (and the env) in place: the webhook deliveries
+# below check it reaches the public log with the path masked
+commit "break restart again for cron" add > /dev/null
+(cd dev && git push -q "$BARE" main > /dev/null 2>&1) || true
+
 # --- webhook ------------------------------------------------------------
 
 section "webhook deliveries"
@@ -317,6 +423,7 @@ if grep -rq "$T" logs/; then not_ok "public log masks server paths" "$(public_lo
 if [[ -n "$HAVE_LR" ]]; then
   check "public log states each log's retention" grep -q "git-deploy: logrotate: retention 14 days: <worktree>/\*.log" <(public_log 100)
 fi
+check "public log states each scheduled job" grep -q "git-deploy: cron: 10 0 \* \* \* as $ME: php -f <worktree>/scripts/clear.php" <(public_log 100)
 check "public log shows progress" grep -q "git-deploy: running deploy_restart" <(public_log 100)
 check "every public log line is timestamped" bash -c "! grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4} git-deploy' <(cat '$T'/logs/100-*.log)"
 

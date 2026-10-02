@@ -377,7 +377,8 @@ elsewhere (a crontab, `/etc/crontab`, another `cron.d` file, an
 `/etc/cron.<period>/` script), since every job would run twice. To migrate
 an app's existing jobs: copy them into `deploy.cron`, then run `sudo
 git-deploy-cron adopt <app> <worktree>` (backs the old entries up to
-`/root/cron.pre-toolkit/` and removes them), then deploy. If `deploy.cron`
+`/root/cron.pre-toolkit/` and removes them), then deploy straight away (push to origin first and rebase if it is rejected, so
+the deploy can't fail after the old jobs are gone). If `deploy.cron`
 is later removed from the repo the installed file stays and each deploy
 warns until `sudo git-deploy-cron remove <app>`. `git-deploy-cron report
 <app> <worktree> < deploy.cron` prints the schedule without installing.

@@ -75,7 +75,10 @@ the sudoers rule) backs those crontabs up to `/root/cron.pre-toolkit/`,
 removes the matching lines and moves matching `cron.<period>` scripts
 aside, printing what it took out so it can be put in `deploy.cron`. Run it
 right before the deploy that installs the file; the jobs are unscheduled
-in between. Host-level jobs (certbot, backups) that don't mention a
+in between, so make sure the push can't be rejected first (fetch, rebase,
+push to origin, then adopt, then push to `deploy` straight away): a
+rejected non-fast-forward push after `adopt` leaves the jobs unscheduled
+until someone notices. Host-level jobs (certbot, backups) that don't mention a
 worktree are never touched.
 
 ## Out of scope

@@ -311,6 +311,11 @@ check "won't overwrite an unmanaged git-deploy-<app> file" bash -c "test '$out' 
 check "remove deletes a managed file" bash -c "'$PYTHON' '$CRH' remove crapp > /dev/null 2>&1 && ! test -e '$CRD/git-deploy-crapp'"
 check "remove refuses an unmanaged file" bash -c "! '$PYTHON' '$CRH' remove other > /dev/null 2>&1 && test -e '$CRD/git-deploy-other'"
 rm -f "$CRD/git-deploy-other"
+# the default allow list (no GIT_DEPLOY_CRON_USERS): the invoking deploy user, via sudo or not, plus www-data
+check "default allow list: report accepts the user running it" bash -c "printf '0 0 * * * $ME /bin/true\n' | env -u GIT_DEPLOY_CRON_USERS -u SUDO_USER '$PYTHON' '$CRH' report crapp '$CRW' > /dev/null 2>&1"
+check "default allow list: install accepts SUDO_USER" bash -c "printf '0 0 * * * $ME /bin/true\n' | env -u GIT_DEPLOY_CRON_USERS SUDO_USER='$ME' '$PYTHON' '$CRH' report crapp '$CRW' > /dev/null 2>&1"
+if getent passwd www-data > /dev/null; then check "default allow list: www-data is allowed too" bash -c "printf '0 0 * * * www-data /bin/true\n' | env -u GIT_DEPLOY_CRON_USERS -u SUDO_USER '$PYTHON' '$CRH' report crapp '$CRW' > /dev/null 2>&1"; else echo "  skip no www-data user on this machine"; fi
+check "default allow list: some other user is not" bash -c "! printf '0 0 * * * nobody /bin/true\n' | env -u GIT_DEPLOY_CRON_USERS -u SUDO_USER '$PYTHON' '$CRH' report crapp '$CRW' > /dev/null 2>&1"
 # one deploy.cron, several targets (prod + beta): @apps scopes the jobs that follow
 scoped_cron() { printf '@apps crapp\n10 0 * * * %s /bin/true\n@apps other\n20 0 * * * %s /bin/false\n@apps *\n30 0 * * * %s /bin/echo all\n' "$ME" "$ME" "$ME"; }
 rep=$(scoped_cron | cr report crapp "$CRW")

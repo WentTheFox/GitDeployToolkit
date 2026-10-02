@@ -88,8 +88,11 @@ def allowed_users():
     elif os.path.isfile(USERS_FILE):
         users = [l.strip() for l in open(USERS_FILE) if l.strip() and not l.startswith("#")]
     else:
-        sudo_user = os.environ.get("SUDO_USER", "")
-        users = ([sudo_user] if sudo_user and sudo_user != "root" else []) + ["www-data"]
+        # The deploy user: whoever invoked sudo, or, for `report` which the hook
+        # runs without sudo, whoever is running this. Both must agree.
+        invoker = os.environ.get("SUDO_USER") or (
+            pwd.getpwuid(os.geteuid()).pw_name if os.geteuid() != 0 else "")
+        users = ([invoker] if invoker and invoker != "root" else []) + ["www-data"]
     return [u for u in users if u != "root"]
 
 

@@ -191,6 +191,14 @@ hook and `git-deploy-new` under `/usr/local/{lib,bin}`. Re-running it
 after a toolkit update is how every app picks up hook changes (they're
 symlinks, so this is instant, no per-app reinstall).
 
+`bin/git-deploy-update` (2026-10-21): by-hand "update this server" —
+pulls the clone recorded in `/usr/local/lib/git-deploy/source` (written by
+`install.sh`) and re-runs `install.sh`. Self-deploying the toolkit through
+its own push-to-deploy was considered and declined: it would need
+`sudo install.sh` from a deploy-user-writable tree (root for anyone who can
+push), can overwrite the running hook, and a bad push would break the
+deploy path with no way to deploy the fix. Don't add it without the user.
+
 Full usage/setup walkthrough is in `README.md` — read that before making
 changes, it's the source of truth for the intended UX.
 

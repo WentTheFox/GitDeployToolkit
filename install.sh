@@ -24,6 +24,9 @@ install -m 0755 "$SRC_DIR/share/git-deploy-logrotate" "$LIB_DIR/git-deploy-logro
 # Same idea for scheduled jobs (deploy.cron).
 install -m 0755 "$SRC_DIR/share/git-deploy-cron" "$LIB_DIR/git-deploy-cron"
 install -m 0755 "$SRC_DIR/bin/git-deploy-new" "$BIN_DIR/git-deploy-new"
+install -m 0755 "$SRC_DIR/bin/git-deploy-update" "$BIN_DIR/git-deploy-update"
+# Where git-deploy-update finds the clone to pull.
+printf '%s\n' "$SRC_DIR" > "$LIB_DIR/source"
 
 # Optional GitHub deployment webhook listener. Installing these files is
 # harmless on a server that doesn't use it — the unit does nothing until
@@ -40,6 +43,7 @@ mkdir -p /srv/git
 echo "git-deploy-toolkit installed:"
 echo "  hook:   $LIB_DIR/post-receive"
 echo "  helper: $BIN_DIR/git-deploy-new"
+echo "  update: $BIN_DIR/git-deploy-update (pulls $SRC_DIR and re-runs this script)"
 echo "  webhook (optional): $LIB_DIR/git-deploy-webhook, git-deploy-webhook@.service"
 echo "  logrotate (optional): $LIB_DIR/git-deploy-logrotate — for apps with a deploy.logrotate, allow it with"
 echo "    <deploy-user> ALL=(root) NOPASSWD: $LIB_DIR/git-deploy-logrotate install *"

@@ -50,7 +50,7 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new install.sh tests/run.sh; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update install.sh tests/run.sh; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"

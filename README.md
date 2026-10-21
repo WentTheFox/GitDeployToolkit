@@ -46,6 +46,12 @@ and the `git-deploy-new` helper to `/usr/local/bin`. Re-run `install.sh`
 after pulling toolkit updates — every app picks up the change instantly
 since hooks are symlinks, no per-app reinstall needed.
 
+To update later, run `git-deploy-update` on the server: it fast-forwards the
+clone `install.sh` was run from (remembered in `/usr/local/lib/git-deploy/source`),
+prints the new commits, and re-runs `install.sh`. It re-executes itself under
+`sudo`, and only ever runs when you run it. A server installed before this
+command existed needs one manual `git pull && sudo ./install.sh` to get it.
+
 ## Adding a new app (once per app, per server)
 
 ```sh

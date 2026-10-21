@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Updates this server's toolkit: fast-forwards the clone install.sh was run
+# from, then re-runs its install.sh. Run it by hand (over SSH) when you want
+# the server on the latest toolkit; nothing triggers it automatically, and
+# it takes no input beyond what the clone's own origin serves.
+#
+# Usage: git-deploy-update      (re-executes itself under sudo if needed)
+
+set -euo pipefail
+
+main() {
+  local lib=/usr/local/lib/git-deploy src old new
+  if [[ $EUID -ne 0 ]]; then exec sudo -- "$0" "$@"; fi
+  src=$(cat "$lib/source" 2> /dev/null) || {
+    echo "git-deploy-update: $lib/source is missing, run install.sh from the clone once first" >&2
+    return 1
+  }
+  [[ -x "$src/install.sh" ]] || { echo "git-deploy-update: no install.sh in $src" >&2; return 1; }
+
+  # The clone is usually owned by someone else than root, which git refuses.
+  local git=(git -c "safe.directory=$src" -C "$src")
+  old=$("${git[@]}" rev-parse HEAD)
+  "${git[@]}" pull --ff-only --quiet
+  new=$("${git[@]}" rev-parse HEAD)
+
+  if [[ "$old" == "$new" ]]; then
+    echo "git-deploy-update: already at ${new:0:7}, reinstalling anyway"
+  else
+    echo "git-deploy-update: ${old:0:7} -> ${new:0:7}"
+    "${git[@]}" log --format='  %h %s' "$old..$new"
+  fi
+  "$src/install.sh"
+}
+
+# Called then exited as one unit, so bash never reads on in a file the pull
+# or install.sh just replaced.
+main "$@"
+exit

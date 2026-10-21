@@ -546,6 +546,7 @@ dmark
 out=$(manual_push "$T/push.env")
 echo "$out" >> all-push-output.txt
 check "discord: started + finished, once each (no double via hand-off)" test "$(discord_titles)" = "Deploy started: App → production|Deploy succeeded: App → production|"
+check "discord: ends with the toolkit attribution link" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '.embeds[0].fields[-1].value | contains(\"](https://github.com/WentTheFox/GitDeployToolkit)\")' > /dev/null"
 check "discord: trigger is git push, no log link" bash -c "tail -1 '$T/statuses.txt.discord' | jq -e '(.embeds[0].fields | map(select(.value == \"git push\")) | length == 1) and (tostring | contains(\"/logs/\") | not)' > /dev/null"
 check "creates a deployment for the pushed commit" test "$(created "$PUSH1")" -eq 1
 check "... with task git-deploy-push (which the webhook ignores)" bash -c "grep '/deployments {' '$T/statuses.txt' | grep '$PUSH1' | grep -q '\"task\":\"git-deploy-push\"'"

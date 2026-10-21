@@ -77,6 +77,10 @@ esac
 fields="{\"name\":\"Trigger\",\"value\":$(json "${GIT_DEPLOY_TRIGGER:-git push}"),\"inline\":true}"
 [[ -z "$DURATION" ]] || fields+=",{\"name\":\"Duration\",\"value\":$(json "${DURATION}s"),\"inline\":true}"
 
+# Discord footers are plain text and can't hold a link, so the attribution is
+# a last, full-width field (zero-width name) that can.
+fields+=',{"name":"\u200b","value":"Powered by [GitDeployToolkit](https://github.com/WentTheFox/GitDeployToolkit)"}'
+
 # allowed_mentions: a commit subject saying @everyone must not ping anyone.
 body="{\"allowed_mentions\":{\"parse\":[]},\"embeds\":[{\"title\":$(json "$title"),\"description\":$(json "$description"),\"color\":$color,\"fields\":[$fields],\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}"
 

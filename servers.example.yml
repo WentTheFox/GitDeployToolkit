@@ -41,14 +41,3 @@ server-a.example:
       manager: systemd
       sensitive: true   # never name this app in any tracked file
   notes: []
-
-pi.example:
-  os: Raspbian
-  runtime: docker compose
-  toolkit_status: not attempted
-  apps:
-    - name: homelab
-      manager: docker-compose
-      repo: github.com/example/homelab
-  notes:
-    - not a deploy target currently

@@ -444,5 +444,3 @@ python3-yaml`), or point `WEBHOOK_BIN=`/`PYTHON=` at your own copies.
 - Only pushes to the configured `BRANCH` trigger a deploy; anything else
   is accepted (so you can still push tags/other branches for backup) but
   ignored.
-- The Raspberry Pi (Raspbian) target isn't covered yet — the scripts
-  should work as-is (plain bash + git), but haven't been tried there.

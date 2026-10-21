@@ -7,10 +7,7 @@ a pattern where nearly every project has its own hand-copied
 `post-receive` hook with minor per-app tweaks. Goal: write the deploy
 mechanism once, reuse it everywhere.
 
-Deploy targets: two Debian VPSes (headless) are the primary focus. A
-Raspberry Pi running Raspbian is a target too but has not been set up or
-tested yet — the toolkit is plain bash + git so it should work there
-as-is, but this is unverified.
+Deploy targets: two Debian VPSes (headless).
 
 ## Design decisions (and why), for context if resuming
 
@@ -279,9 +276,6 @@ changes, it's the source of truth for the intended UX.
   Winterchilla deployed clean. Muffins needed the `tsc` fixes in the
   pitfall below (repo side plus its untracked server config) and then
   deployed clean via its first Deploy-button run.
-- The Raspberry Pi target: not attempted — per `servers.local.yml`, no
-  app there obviously matches the `/var/www` or `/var/node` convention,
-  needs investigation before migrating anything.
 - Next steps whenever the user wants to proceed: same recipe as the apps
   above, applied to whatever's next.
 

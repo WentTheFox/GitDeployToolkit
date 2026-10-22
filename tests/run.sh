@@ -50,7 +50,7 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh share/pre-receive; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh share/pre-receive share/pm2-wrapper; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
@@ -964,6 +964,36 @@ check "the rejection says who pushed" grep -q "pushed as '$ME'" push.out
 printf '%s\n' "$ME" > "$GIT_DEPLOY_ETC/user"
 check "a push as the configured deploy user is accepted" bash -c "cd '$T/dev' && git push -q ../srv/app.git main"
 check "git-deploy-new chowns to the configured user (and prints its remote)" bash -c "GIT_DEPLOY_LIB='$ROOT/share' GIT_DEPLOY_REPO_ROOT='$T/srv' '$ROOT/bin/git-deploy-new' owner-app '$T/www/owner-app' | grep -q 'ssh://$ME@'"
+rm -f "$GIT_DEPLOY_ETC/user"
+
+section "pm2 wrapper"
+PW="$T/pm2w"; mkdir -p "$PW/bin"
+cat > "$PW/real-pm2" <<'FAKEPM2'
+#!/usr/bin/env bash
+echo "REAL pm2 as $(id -un) in $PWD: $*"
+FAKEPM2
+# a stub sudo: logs the call; answers the wrapper's cwd probe from $FAKE_CWD_OK; runs the rest
+cat > "$PW/bin/sudo" <<'FAKESUDO'
+#!/usr/bin/env bash
+echo "sudo $*" >> "$FAKE_SUDO_LOG"
+while [[ "$1" == -* ]]; do case "$1" in -u) shift 2 ;; *) shift ;; esac; done
+if [[ "$1" == test ]]; then [[ "${FAKE_CWD_OK:-1}" == 1 ]]; exit; fi
+exec "$@"
+FAKESUDO
+chmod +x "$PW/real-pm2" "$PW/bin/sudo"
+sed "s#@REAL_PM2@#$PW/real-pm2#g" "$ROOT/share/pm2-wrapper" > "$PW/pm2"; chmod +x "$PW/pm2"
+export FAKE_SUDO_LOG="$PW/sudo.log"
+pw() { : > "$FAKE_SUDO_LOG"; (cd "${PW_CWD:-$PW}" && PATH="$PW/bin:$PATH" "$PW/pm2" "$@" 2> "$PW/err"); }
+rm -f "$GIT_DEPLOY_ETC/user"
+check "pm2 wrapper: no deploy user configured -> runs the real pm2 directly" bash -c "[[ \"\$(PATH='$PW/bin:$PATH' GIT_DEPLOY_ETC='$GIT_DEPLOY_ETC' '$PW/pm2' jlist)\" == 'REAL pm2 as $ME in '*': jlist' ]] && [[ ! -s '$FAKE_SUDO_LOG' ]]"
+printf '%s\n' "$ME" > "$GIT_DEPLOY_ETC/user"
+out=$(pw list); check "pm2 wrapper: already the deploy user -> no sudo" bash -c "[[ '$out' == 'REAL pm2 as $ME'* ]] && [[ ! -s '$FAKE_SUDO_LOG' ]]"
+printf 'someone-else\n' > "$GIT_DEPLOY_ETC/user"
+out=$(pw restart app --update-env)
+check "pm2 wrapper: another user -> sudo -n -u <deploy> -H <real pm2> with the args" grep -qxF "sudo -n -u someone-else -H $PW/real-pm2 restart app --update-env" "$FAKE_SUDO_LOG"
+check "pm2 wrapper: the real pm2 ran with the arguments" bash -c "[[ '$out' == *': restart app --update-env' ]]"
+out=$(FAKE_CWD_OK=0 pw list)
+check "pm2 wrapper: a cwd the deploy user cannot read -> falls back to / and says so" bash -c "[[ '$out' == 'REAL pm2 as $ME in /: list' ]] && grep -q 'using / instead' '$PW/err'"
 rm -f "$GIT_DEPLOY_ETC/user"
 
 echo

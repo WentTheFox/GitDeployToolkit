@@ -347,6 +347,11 @@ Non-obvious decisions, don't undo without a reason:
   links it into every bare repo on our hook; `git-deploy-new` does for new
   ones. The webhook path doesn't push, so it's unaffected.
 - **fixperms and release directories:** in a `RELEASES=1` release `storage` is a symlink into `<base>/shared`, so the helper accepts a symlinked path only if it resolves inside that release's own `shared/` (a real dir) and then works from an fd on `shared/`. Anywhere else a symlinked path is refused. (The old raw `chgrp -R storage` on such a link never touched `shared/storage` at all.)
+- **pm2 wrapper** (`share/pm2-wrapper` -> `/usr/local/bin/pm2`, installed by
+  `--deploy-user`): any pm2 command as another user starts a stray daemon (it
+  happened once on the second VPS); the wrapper re-runs it as the deploy user.
+  A wrapper, not an alias: aliases don't cover `ssh host pm2 ...`. Falls back to
+  `cd /` when the cwd isn't readable by the deploy user.
 - `install.sh --deploy-user NAME` writes `/etc/git-deploy/user` and
   `/etc/sudoers.d/git-deploy` (validated with `visudo -cf`; refuses to
   overwrite on failure); a plain re-run / `git-deploy-update` reuses the

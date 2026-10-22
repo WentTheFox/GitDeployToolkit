@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# managed by git-deploy-toolkit install.sh (pm2 wrapper) — see docs/deploy-user.md
+#
+# pm2 keeps one daemon per OS user, and every pm2 command silently starts one if
+# there is none. On a server with a dedicated deploy user, the apps live in the
+# deploy user's daemon, so a bare `pm2 list` as anyone else would start a second,
+# empty daemon (and its own ~/.pm2) and show nothing. This wrapper sends every
+# invocation to the deploy user's daemon instead. A shell alias would not do:
+# it does not apply to `ssh host pm2 ...` or to scripts.
+#
+# The real binary is @REAL_PM2@; this file is installed ahead of it on PATH.
+# Reach the real one directly (and a daemon of your own) only on purpose.
+
+REAL_PM2="@REAL_PM2@"
+DEPLOY_USER="$(head -n1 "${GIT_DEPLOY_ETC:-/etc/git-deploy}/user" 2> /dev/null || true)"
+
+# No deploy user configured, or already running as it (the deploy hook, the
+# webhook listener, a deploy login): nothing to switch.
+if [[ -z "$DEPLOY_USER" || "$(id -un)" == "$DEPLOY_USER" ]]; then
+  exec "$REAL_PM2" "$@"
+fi
+
+# pm2 resolves relative paths against the current directory and fails outright
+# if it cannot read it, e.g. an admin's 0750 home. Fall back to / with a notice.
+if ! sudo -n -u "$DEPLOY_USER" test -x "$PWD" -a -r "$PWD" 2> /dev/null; then
+  echo "pm2: running as $DEPLOY_USER; $PWD is not readable by it, using / instead" >&2
+  cd /
+fi
+
+exec sudo -n -u "$DEPLOY_USER" -H "$REAL_PM2" "$@"

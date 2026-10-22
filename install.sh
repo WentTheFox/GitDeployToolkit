@@ -68,6 +68,7 @@ mkdir -p "$REPO_ROOT"
 install -d -m 0755 "$ETC_DIR"
 [[ -z "$DEPLOY_USER" && -f "$ETC_DIR/user" ]] && DEPLOY_USER="$(head -n1 "$ETC_DIR/user")"
 SUDO_STATUS="not managed (no deploy user given; pass --deploy-user NAME to have it written)"
+PM2_STATUS="not installed (needs --deploy-user)"
 if [[ -n "$DEPLOY_USER" ]]; then
   [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ && "$DEPLOY_USER" != root ]] \
     || { echo "install.sh: '$DEPLOY_USER' is not a usable deploy user name" >&2; exit 1; }
@@ -118,6 +119,29 @@ SUDOERS
     echo "install.sh: generated sudoers did not validate; left $SUDOERS_FILE alone" >&2
     exit 1
   fi
+
+  # pm2 keeps one daemon per OS user and starts one on any command, so a bare
+  # `pm2 list` as an admin login would spawn a second, empty daemon. Put a wrapper
+  # ahead of the real binary that runs pm2 as the deploy user (an alias would not
+  # cover `ssh host pm2 ...`). Never replaces a pm2 that is not ours.
+  REAL_PM2=""
+  IFS=: read -ra PATH_DIRS <<< "$PATH"
+  for dir in "${PATH_DIRS[@]}"; do
+    [[ "$dir" == "$BIN_DIR" || ! -x "$dir/pm2" ]] && continue
+    REAL_PM2="$(readlink -f "$dir/pm2")"
+    break
+  done
+  PM2_STATUS="no pm2 found on PATH, wrapper not installed"
+  if [[ -n "$REAL_PM2" ]]; then
+    if [[ -e "$BIN_DIR/pm2" ]] && ! grep -q 'managed by git-deploy-toolkit install.sh (pm2 wrapper)' "$BIN_DIR/pm2"; then
+      PM2_STATUS="$BIN_DIR/pm2 exists and is not ours, left alone"
+    else
+      sed "s#@REAL_PM2@#$REAL_PM2#g" "$SRC_DIR/share/pm2-wrapper" > "$BIN_DIR/pm2.new"
+      chmod 0755 "$BIN_DIR/pm2.new"
+      mv -f "$BIN_DIR/pm2.new" "$BIN_DIR/pm2"
+      PM2_STATUS="$BIN_DIR/pm2 runs $REAL_PM2 as $DEPLOY_USER for everyone else"
+    fi
+  fi
 fi
 
 echo "git-deploy-toolkit installed:"
@@ -129,6 +153,7 @@ echo "    An app's deploy_restart usually needs a php-fpm reload after the swap,
 echo "    <deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl reload php*-fpm  (scope it to your unit)"
 echo "  webhook (optional): $LIB_DIR/git-deploy-webhook, git-deploy-webhook@.service"
 echo "  sudo: $SUDO_STATUS"
+echo "  pm2:  $PM2_STATUS"
 echo "  root helpers (reached only through that sudoers file): git-deploy-service, git-deploy-fixperms,"
 echo "    git-deploy-logrotate (deploy.logrotate), git-deploy-cron (deploy.cron). See docs/deploy-user.md."
 if [[ -z "$DEPLOY_USER" ]]; then

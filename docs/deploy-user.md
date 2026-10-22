@@ -50,6 +50,20 @@ still run code as the deploy user and as `www-data` (that is what a deploy is).
 It limits the blast radius to those two accounts, away from root, the admin's
 files and other users.
 
+## `pm2` for everyone else
+
+pm2 keeps one daemon per OS user and silently starts one on any command. With the
+apps in `deploy`'s daemon, a bare `pm2 list` as the admin login would start a
+second, empty daemon (and a `~/.pm2`) and show nothing; this happened once while
+migrating. `install.sh --deploy-user` therefore installs `/usr/local/bin/pm2`, a
+wrapper that runs the real pm2 as the deploy user for everyone else
+(`sudo -n -u deploy -H /usr/bin/pm2 ...`) and straight through when already
+running as `deploy`. It is a wrapper rather than an alias because an alias
+applies only to interactive shells, not to `ssh host pm2 ...` or scripts. If
+your current directory is not readable by `deploy` (an admin's 0750 home), it
+runs from `/` and says so. It never replaces a `/usr/local/bin/pm2` it did not
+write. The real binary stays reachable by its own path.
+
 ## Rejecting pushes from anyone else
 
 `/etc/git-deploy/user` holds the deploy user's name. The shared `pre-receive`

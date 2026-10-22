@@ -45,6 +45,8 @@ install -m 0755 "$SRC_DIR/share/git-deploy-fixperms" "$LIB_DIR/git-deploy-fixper
 install -m 0755 "$SRC_DIR/share/git-deploy-service" "$LIB_DIR/git-deploy-service"
 install -m 0755 "$SRC_DIR/bin/git-deploy-new" "$BIN_DIR/git-deploy-new"
 install -m 0755 "$SRC_DIR/bin/git-deploy-update" "$BIN_DIR/git-deploy-update"
+# Read-only health check of the deploy-user setup (sudo git-deploy-check).
+install -m 0755 "$SRC_DIR/bin/git-deploy-check" "$BIN_DIR/git-deploy-check"
 # Optional release directories (RELEASES=1): rollback, and the one-time conversion.
 install -m 0755 "$SRC_DIR/bin/git-deploy-rollback" "$BIN_DIR/git-deploy-rollback"
 install -m 0755 "$SRC_DIR/bin/git-deploy-releases-init" "$BIN_DIR/git-deploy-releases-init"
@@ -147,6 +149,7 @@ fi
 echo "git-deploy-toolkit installed:"
 echo "  hook:   $LIB_DIR/post-receive"
 echo "  helper: $BIN_DIR/git-deploy-new"
+echo "  check:  $BIN_DIR/git-deploy-check (sudo git-deploy-check: read-only health check of the setup)"
 echo "  update: $BIN_DIR/git-deploy-update (pulls $SRC_DIR and re-runs this script)"
 echo "  releases (optional): git-deploy-rollback, git-deploy-releases-init — see README \"Release directories\"."
 echo "    An app's deploy_restart usually needs a php-fpm reload after the swap, e.g."

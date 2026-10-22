@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# Read-only health check of a server's toolkit + dedicated-deploy-user setup.
+# Run it on the server, as root for the full set (some checks read root-only
+# files or test another user's access):
+#
+#   sudo git-deploy-check            # all sections
+#   sudo git-deploy-check logrotate  # only the named sections
+#
+# Sections: user sudo helpers services repos pm2 logrotate cron webhook systemd
+# Prints one line per finding (ok / WARN / FAIL) and a summary; exit status 1
+# if anything FAILed. It never changes anything. See docs/deploy-user.md.
+#
+# Each check exists because that failure actually happened while migrating the
+# two servers (the migration did not fail loudly in any of these cases):
+#   logrotate - a pm2 stanza still said `su <old login>`: logrotate only failed at night
+#   pm2       - a bare `pm2 list` as the admin login started a stray second daemon
+#   systemd   - Horizon units not ordered after Redis hung 90 s at every shutdown
+#   repos     - the directory holding the worktree symlink still owned by the old login
+#
+# Test/override knobs: GIT_DEPLOY_ETC, GIT_DEPLOY_LIB, GIT_DEPLOY_REPO_ROOT,
+# GIT_DEPLOY_SUDOERS_FILE, LOGROTATE_D, CRON_D, and GIT_DEPLOY_CHECK_AS (the
+# prefix used to test another user's access; empty = test as the current user).
+
+set -uo pipefail
+
+ETC="${GIT_DEPLOY_ETC:-/etc/git-deploy}"
+LIB="${GIT_DEPLOY_LIB:-/usr/local/lib/git-deploy}"
+REPO_ROOT="${GIT_DEPLOY_REPO_ROOT:-/srv/git}"
+SUDOERS_FILE="${GIT_DEPLOY_SUDOERS_FILE:-/etc/sudoers.d/git-deploy}"
+LR_D="${LOGROTATE_D:-/etc/logrotate.d}"
+CRON_D="${CRON_D:-/etc/cron.d}"
+BIN_DIR="/usr/local/bin"
+AS="${GIT_DEPLOY_CHECK_AS-sudo -n -u}"
+WEB_USER="${GIT_DEPLOY_WEB_USER:-www-data}"
+
+ALL_SECTIONS="user sudo helpers services repos pm2 logrotate cron webhook systemd"
+WANT="${*:-$ALL_SECTIONS}"
+
+PASS=0 WARNS=0 FAILS=0
+ok() { PASS=$((PASS + 1)); echo "  ok   $*"; }
+warn() { WARNS=$((WARNS + 1)); echo "  WARN $*"; }
+fail() { FAILS=$((FAILS + 1)); echo "  FAIL $*"; }
+section() { echo; echo "== $*"; }
+wanted() { [[ " $WANT " == *" $1 "* ]]; }
+is_root() { [[ $EUID -eq 0 ]]; }
+have_systemd() { command -v systemctl > /dev/null && [[ -d /run/systemd/system ]]; }
+
+# can_write <user> <path>: could that user write the path?
+can_write() {
+  if [[ -z "$AS" ]]; then test -w "$2"; else $AS "$1" test -w "$2" 2> /dev/null; fi
+}
+
+for s in $WANT; do
+  [[ " $ALL_SECTIONS " == *" $s "* ]] || { echo "git-deploy-check: unknown section '$s' (sections: $ALL_SECTIONS)" >&2; exit 2; }
+done
+if [[ -n "$AS" ]] && ! is_root; then
+  echo "note: not root, so checks that read root-only files or test another user's access are skipped or partial"
+fi
+
+# --- user ---------------------------------------------------------------
+DU=""
+if [[ -f "$ETC/user" ]]; then DU="$(head -n1 "$ETC/user")"; fi
+if wanted user; then
+  section "deploy user"
+  if [[ -z "$DU" ]]; then
+    fail "no $ETC/user: no deploy user configured (install.sh --deploy-user NAME)"
+  elif [[ "$DU" == root ]]; then
+    fail "the deploy user is root"
+  elif ! id -u "$DU" > /dev/null 2>&1; then
+    fail "deploy user '$DU' (from $ETC/user) does not exist"
+  else
+    ok "deploy user is '$DU'"
+  fi
+fi
+if [[ -z "$DU" ]]; then
+  echo; echo "$PASS ok, $WARNS warnings, $FAILS failed"; exit $(( FAILS > 0 ))
+fi
+
+# --- sudo ---------------------------------------------------------------
+if wanted sudo; then
+  section "sudo"
+  if ! is_root; then
+    warn "sudo checks need root, skipped"
+  else
+    if [[ -f "$SUDOERS_FILE" ]]; then
+      ok "$SUDOERS_FILE exists"
+      if command -v visudo > /dev/null; then
+        if visudo -cf "$SUDOERS_FILE" > /dev/null 2>&1; then ok "it passes visudo -c"; else fail "$SUDOERS_FILE does not validate (visudo -cf)"; fi
+      fi
+    else
+      fail "$SUDOERS_FILE is missing (install.sh --deploy-user $DU writes it)"
+    fi
+    # Anything giving the deploy user root (or any user but the web user) for ALL commands.
+    broad=$(grep -rhE "^[[:space:]]*(${DU}|%${DU})[[:space:]]" /etc/sudoers /etc/sudoers.d "$SUDOERS_FILE" 2> /dev/null \
+      | grep -vE '^[[:space:]]*#' | grep -E "=[[:space:]]*\((ALL|root)[^)]*\)[[:space:]]*((NO)?PASSWD:[[:space:]]*)?ALL[[:space:]]*$" | sort -u || true)
+    if [[ -n "$broad" ]]; then fail "the deploy user has unrestricted root: $(printf '%s' "$broad" | head -1 | tr -s ' \t' ' ')"; else ok "no unrestricted root rule for $DU"; fi
+    # The leftover rules the old per-feature sudoers files had, redundant now.
+    for f in git-deploy-cron git-deploy-logrotate; do
+      [[ -f "/etc/sudoers.d/$f" ]] && warn "/etc/sudoers.d/$f is still there; /etc/sudoers.d/git-deploy covers it"
+    done
+  fi
+fi
+
+# --- helpers ------------------------------------------------------------
+if wanted helpers; then
+  section "installed helpers"
+  for h in post-receive pre-receive git-deploy-service git-deploy-fixperms git-deploy-logrotate git-deploy-cron; do
+    if [[ -x "$LIB/$h" ]]; then ok "$LIB/$h"; else fail "$LIB/$h is missing or not executable (git-deploy-update)"; fi
+  done
+fi
+
+# --- services allow-list ------------------------------------------------
+if wanted services; then
+  section "service allow-list"
+  SF="$ETC/services"
+  if [[ ! -f "$SF" ]]; then
+    warn "$SF does not exist: git-deploy-service will refuse every unit"
+  else
+    owner=$(stat -c %U "$SF"); mode=$(stat -c %a "$SF")
+    if [[ "$owner" != root && -z "${GIT_DEPLOY_ETC:-}" ]]; then fail "$SF is owned by $owner, not root (the helper refuses it)"; else ok "$SF is root-owned"; fi
+    [[ "${mode: -1}" =~ [2367] || "${mode: -2:1}" =~ [2367] ]] && fail "$SF is writable by group or others (mode $mode)"
+    if have_systemd; then
+      units=$(systemctl list-unit-files --type=service --no-legend 2> /dev/null | awk '{print $1}')
+      while read -r actions pat _; do
+        [[ -z "${actions:-}" || "$actions" == \#* ]] && continue
+        match=0; while read -r u; do [[ "$u" == $pat ]] && { match=1; break; }; done <<< "$units"
+        if [[ $match == 1 ]]; then ok "allow-list: $actions $pat matches an installed unit"; else warn "allow-list: '$pat' matches no installed unit (stale rule?)"; fi
+      done < "$SF"
+    fi
+  fi
+fi
+
+# --- bare repos, worktrees ---------------------------------------------
+if wanted repos; then
+  section "bare repos and worktrees"
+  n=0
+  for repo in "$REPO_ROOT"/*.git; do
+    [[ -d "$repo" ]] || continue
+    [[ -L "$repo/hooks/post-receive" && "$(readlink "$repo/hooks/post-receive")" == "$LIB/post-receive" ]] || continue
+    n=$((n + 1)); app=$(basename "$repo" .git)
+    owner=$(stat -c %U "$repo")
+    if [[ "$owner" == "$DU" ]]; then ok "$app: bare repo owned by $DU"; else fail "$app: bare repo is owned by $owner, not $DU"; fi
+    if [[ -L "$repo/hooks/pre-receive" ]]; then ok "$app: pre-receive guard linked"; else fail "$app: no pre-receive hook, pushes from other users are not rejected (install.sh)"; fi
+    wt=$(sed -n 's/^WORKTREE=//p' "$repo/deploy.env" 2> /dev/null | head -1)
+    if [[ -z "$wt" || ! ( -e "$wt" || -L "$wt" ) ]]; then fail "$app: worktree '${wt:-?}' does not exist"; continue; fi
+    wowner=$(stat -c %U "$wt")   # the symlink itself in release mode
+    if [[ "$wowner" == "$DU" ]]; then ok "$app: worktree owned by $DU"; else warn "$app: worktree owned by $wowner, not $DU"; fi
+    if grep -q '^RELEASES=1' "$repo/deploy.env" 2> /dev/null; then
+      parent=$(dirname "$wt")
+      if can_write "$DU" "$parent"; then ok "$app: $DU can swap the release symlink in $parent"; else fail "$app: $DU cannot write $parent, so the release swap will fail"; fi
+    fi
+  done
+  [[ $n -eq 0 ]] && warn "no toolkit bare repos found under $REPO_ROOT"
+fi
+
+# --- pm2 ----------------------------------------------------------------
+if wanted pm2; then
+  section "pm2"
+  if ! command -v pm2 > /dev/null && ! [[ -x "$BIN_DIR/pm2" ]]; then
+    ok "pm2 is not installed here, nothing to check"
+  else
+    other=$(ps -eo user=,args= 2> /dev/null | grep -E 'PM2 v[0-9]' | grep -v grep | awk -v du="$DU" '$1 != du {print $1}' | sort -u | paste -sd, -)
+    if [[ -z "$other" ]]; then ok "no pm2 daemon runs as anyone but $DU"; else fail "a pm2 daemon runs as: $other (a bare pm2 command starts one; use the wrapper)"; fi
+    stray=""
+    for h in /home/*/.pm2 /root/.pm2; do
+      [[ -d "$h" ]] || continue
+      [[ "$(stat -c %U "$h")" == "$DU" ]] || stray="$stray $h"
+    done
+    if [[ -z "$stray" ]]; then ok "no pm2 home belongs to anyone but $DU"; else warn "stray pm2 home(s):$stray (leftover from before the move, or a bare pm2 run)"; fi
+    if [[ -f "$BIN_DIR/pm2" ]] && grep -q 'pm2 wrapper' "$BIN_DIR/pm2"; then ok "$BIN_DIR/pm2 wrapper is installed"; else warn "no pm2 wrapper at $BIN_DIR/pm2: bare pm2 as another user starts a stray daemon (install.sh --deploy-user)"; fi
+    if have_systemd; then
+      enabled=$(systemctl list-unit-files 'pm2-*.service' --no-legend 2> /dev/null | awk '$2=="enabled"{print $1}')
+      for u in $enabled; do [[ "$u" == "pm2-$DU.service" ]] || fail "$u is enabled; it resurrects another user's pm2 at boot"; done
+      if [[ " $enabled " == *" pm2-$DU.service "* ]]; then ok "pm2-$DU.service is enabled (processes come back after a reboot)"; else warn "pm2-$DU.service is not enabled (pm2 startup systemd -u $DU --hp ~$DU)"; fi
+    fi
+  fi
+fi
+
+# --- logrotate ----------------------------------------------------------
+if wanted logrotate; then
+  section "logrotate policies"
+  shopt -s nullglob
+  files=("$LR_D"/git-deploy-*)
+  if [[ ${#files[@]} -eq 0 ]]; then
+    ok "no git-deploy logrotate policies installed"
+  fi
+  for f in "${files[@]}"; do
+    name=$(basename "$f"); bad=0; seen=" "
+    while IFS=$'\t' read -r u path; do
+      dir=$(dirname "$path")
+      key="$u:$dir"; [[ "$seen" == *" $key "* ]] && continue; seen="$seen$key "
+      if [[ -z "$u" ]]; then
+        warn "$name: no su line for $path (logrotate refuses group-writable parents without one)"; bad=1
+      elif [[ "$u" != "$DU" && "$u" != "$WEB_USER" ]]; then
+        fail "$name: su $u is neither $DU nor $WEB_USER, rotation of $path would run as the wrong user (a leftover from the old login?)"; bad=1
+      elif [[ ! -d "$dir" ]]; then
+        warn "$name: $dir does not exist yet"; bad=1
+      elif ! can_write "$u" "$dir"; then
+        fail "$name: su $u cannot write $dir, so rotating $path fails"; bad=1
+      fi
+    done < <(awk '/^[[:space:]]*\//{ sub(/^[[:space:]]+/,""); sub(/[[:space:]]*\{[[:space:]]*$/,""); p[n++]=$0; next }
+                  /^[[:space:]]*su[[:space:]]/{ u=$2 }
+                  /\}/{ for(i=0;i<n;i++) print u "\t" p[i]; n=0; u="" }' "$f")
+    if is_root && command -v logrotate > /dev/null; then
+      e=$(logrotate -d "$f" 2>&1 | grep -E '^error:|skipping|insecure' | head -1 || true)
+      if [[ -n "$e" ]]; then fail "$name: logrotate -d reports: $e"; bad=1; fi
+    fi
+    [[ $bad -eq 0 ]] && ok "$name: every su user can write its log directories"
+  done
+  shopt -u nullglob
+fi
+
+# --- cron ---------------------------------------------------------------
+if wanted cron; then
+  section "scheduled jobs"
+  shopt -s nullglob
+  cfiles=("$CRON_D"/git-deploy-*)
+  [[ ${#cfiles[@]} -eq 0 ]] && ok "no git-deploy cron files installed"
+  for f in "${cfiles[@]}"; do
+    name=$(basename "$f"); bad=0
+    while read -r a b c d e user _; do
+      [[ -z "${a:-}" || "$a" == \#* || "$a" == *=* ]] && continue
+      if [[ "$a" == @* ]]; then user="$b"; fi
+      if [[ "$user" == root ]]; then fail "$name: a job runs as root"; bad=1
+      elif [[ "$user" != "$DU" && "$user" != "$WEB_USER" ]]; then fail "$name: a job runs as $user, not $DU or $WEB_USER"; bad=1; fi
+    done < "$f"
+    [[ $bad -eq 0 ]] && ok "$name: jobs run as $DU or $WEB_USER"
+  done
+  shopt -u nullglob
+fi
+
+# --- webhook ------------------------------------------------------------
+if wanted webhook; then
+  section "webhook listener"
+  if [[ ! -f "$ETC/webhook.env" ]]; then
+    ok "no webhook configured here ($ETC/webhook.env missing)"
+  else
+    mode=$(stat -c %a "$ETC/webhook.env")
+    if [[ "${mode: -1}" == 0 ]]; then ok "webhook.env is not world-readable (mode $mode)"; else fail "webhook.env is world-readable (mode $mode), it holds the secret and token"; fi
+    if have_systemd; then
+      en=$(systemctl list-unit-files 'git-deploy-webhook@*.service' --no-legend 2> /dev/null | awk '$2=="enabled"{print $1}')
+      for u in $en; do [[ "$u" == "git-deploy-webhook@$DU.service" ]] || fail "$u is enabled; the listener should run as $DU"; done
+      if systemctl is-active --quiet "git-deploy-webhook@$DU.service"; then ok "git-deploy-webhook@$DU is active"; else fail "git-deploy-webhook@$DU is not active"; fi
+    fi
+  fi
+fi
+
+# --- systemd ------------------------------------------------------------
+if wanted systemd; then
+  section "systemd"
+  if ! have_systemd; then
+    warn "no systemd here, skipped"
+  else
+    nf=$(systemctl --failed --no-legend 2> /dev/null | wc -l)
+    if [[ $nf -eq 0 ]]; then ok "no failed units"; else warn "$nf failed unit(s): $(systemctl --failed --no-legend | awk '{print $1}' | paste -sd' ' -)"; fi
+    for u in /etc/systemd/system/*.service; do
+      [[ -f "$u" ]] && grep -q 'artisan horizon' "$u" || continue
+      after=$(systemctl show -p After --value "$(basename "$u")" 2> /dev/null)
+      if [[ "$after" == *valkey* || "$after" == *redis* ]]; then ok "$(basename "$u"): ordered after Redis"
+      else warn "$(basename "$u"): Horizon is not ordered After= Redis, so it hangs for its 90 s stop timeout at every shutdown"; fi
+    done
+  fi
+fi
+
+echo
+echo "$PASS ok, $WARNS warnings, $FAILS failed"
+exit $(( FAILS > 0 ))

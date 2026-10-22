@@ -351,6 +351,12 @@ Non-obvious decisions, don't undo without a reason:
   `deploy.logrotate` / `deploy.cron`: after fixing those in a repo but before it is
   deployed, replaying the old commit (the `echo "$sha $sha refs/heads/main" |
   post-receive` check) reinstalls the old policy. Hit once (PennyCurve's `su`).
+- **`bin/git-deploy-check`** (installed as `sudo git-deploy-check`): read-only
+  audit of the deploy-user setup; every check encodes an incident from the two
+  migrations (see the table in `docs/deploy-user.md`). Run it after
+  `git-deploy-update` / a migration. Tested in a sandbox in `tests/run.sh`
+  (mutation-checked); the root-only sections (`sudo`, `-d` logrotate parsing) are
+  not covered by the tests, only by running it on a real server.
 - **pm2 wrapper** (`share/pm2-wrapper` -> `/usr/local/bin/pm2`, installed by
   `--deploy-user`): any pm2 command as another user starts a stray daemon (it
   happened once on the second VPS); the wrapper re-runs it as the deploy user.

@@ -50,7 +50,7 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh share/pre-receive share/pm2-wrapper; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-check bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh share/pre-receive share/pm2-wrapper; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
@@ -995,6 +995,43 @@ check "pm2 wrapper: the real pm2 ran with the arguments" bash -c "[[ '$out' == *
 out=$(FAKE_CWD_OK=0 pw list)
 check "pm2 wrapper: a cwd the deploy user cannot read -> falls back to / and says so" bash -c "[[ '$out' == 'REAL pm2 as $ME in /: list' ]] && grep -q 'using / instead' '$PW/err'"
 rm -f "$GIT_DEPLOY_ETC/user"
+
+section "git-deploy-check"
+CK="$ROOT/bin/git-deploy-check"; CKD="$T/chk"
+mkdir -p "$CKD/etc" "$CKD/lib" "$CKD/repos" "$CKD/lr" "$CKD/cron" "$CKD/logs" "$CKD/wt"
+for h in post-receive pre-receive git-deploy-service git-deploy-fixperms git-deploy-logrotate git-deploy-cron; do printf '#!/bin/sh\n' > "$CKD/lib/$h"; chmod +x "$CKD/lib/$h"; done
+printf '%s\n' "$ME" > "$CKD/etc/user"
+git init -q --bare "$CKD/repos/app.git"
+ln -s "$CKD/lib/post-receive" "$CKD/repos/app.git/hooks/post-receive"; ln -s "$CKD/lib/pre-receive" "$CKD/repos/app.git/hooks/pre-receive"
+printf 'WORKTREE=%s\n' "$CKD/wt" > "$CKD/repos/app.git/deploy.env"
+policy() { printf '%s/logs/app.log {\n\tsu %s %s\n\tdaily\n\trotate 13\n}\n' "$CKD" "$1" "$MYGRP" > "$CKD/lr/git-deploy-app"; }
+policy "$ME"
+printf '# managed by git-deploy\nMAILTO=""\n* * * * * %s cd /x && true\n@daily www-data /bin/true\n' "$ME" > "$CKD/cron/git-deploy-app"
+ck() { GIT_DEPLOY_ETC="$CKD/etc" GIT_DEPLOY_LIB="$CKD/lib" GIT_DEPLOY_REPO_ROOT="$CKD/repos" LOGROTATE_D="$CKD/lr" CRON_D="$CKD/cron" GIT_DEPLOY_CHECK_AS="" "$CK" "$@" 2>&1; }
+ck_rc() { local rc=0; ck "$@" > "$CKD/out" || rc=$?; echo "$rc"; }
+check "check: a healthy sandbox passes (exit 0, nothing FAILed)" bash -c "[[ \$(cd '$CKD' && GIT_DEPLOY_ETC='$CKD/etc' GIT_DEPLOY_LIB='$CKD/lib' GIT_DEPLOY_REPO_ROOT='$CKD/repos' LOGROTATE_D='$CKD/lr' CRON_D='$CKD/cron' GIT_DEPLOY_CHECK_AS='' '$CK' user helpers repos logrotate cron >/dev/null 2>&1; echo \$?) == 0 ]]"
+check "check: reports each log directory as writable by its su user" bash -c "'$CK' >/dev/null 2>&1; GIT_DEPLOY_ETC='$CKD/etc' GIT_DEPLOY_LIB='$CKD/lib' GIT_DEPLOY_REPO_ROOT='$CKD/repos' LOGROTATE_D='$CKD/lr' CRON_D='$CKD/cron' GIT_DEPLOY_CHECK_AS='' '$CK' logrotate 2>&1 | grep -q 'every su user can write'"
+policy "oldlogin"
+out=$(ck logrotate || true); rc=$(ck_rc logrotate)
+check "check: a stanza still 'su <old login>' FAILs (the regression found after migrating)" bash -c "[[ $rc == 1 ]] && grep -q 'neither .* nor www-data' <<< \"\$(cat '$CKD/out')\""
+policy "$ME"
+if [[ $EUID -ne 0 ]]; then
+  chmod 555 "$CKD/logs"; rc=$(ck_rc logrotate)
+  check "check: a su user that cannot write the log dir FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'cannot write' '$CKD/out'"
+  chmod 755 "$CKD/logs"
+fi
+printf '* * * * * root /bin/true\n' > "$CKD/cron/git-deploy-app"; rc=$(ck_rc cron)
+check "check: a cron job as root FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'runs as root' '$CKD/out'"
+printf '* * * * * somebody /bin/true\n' > "$CKD/cron/git-deploy-app"; rc=$(ck_rc cron)
+check "check: a cron job as the old login FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'runs as somebody' '$CKD/out'"
+rm -f "$CKD/cron/git-deploy-app" "$CKD/repos/app.git/hooks/pre-receive"; rc=$(ck_rc repos)
+check "check: a bare repo without the pre-receive guard FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'no pre-receive hook' '$CKD/out'"
+rm -f "$CKD/lib/git-deploy-fixperms"; rc=$(ck_rc helpers)
+check "check: a missing root helper FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'git-deploy-fixperms is missing' '$CKD/out'"
+mv "$CKD/etc/user" "$CKD/etc/user.bak"; rc=$(ck_rc user)
+check "check: no configured deploy user FAILs" bash -c "[[ $rc == 1 ]] && grep -q 'no deploy user configured' '$CKD/out'"
+mv "$CKD/etc/user.bak" "$CKD/etc/user"
+check "check: an unknown section is a usage error (exit 2)" bash -c "GIT_DEPLOY_ETC='$CKD/etc' '$CK' nosuchsection >/dev/null 2>&1; [[ \$? == 2 ]]"
 
 echo
 echo "$PASSED passed, $FAILED failed"

@@ -151,6 +151,27 @@ pm2 process restarts once, and each app is briefly owned by someone mid-move.
 
 Rollback: until step 7, re-point `/etc/git-deploy/user` and the units at `OLD`.
 
+## Checking a server: `git-deploy-check`
+
+`sudo git-deploy-check` (installed by `install.sh`, source `bin/git-deploy-check`)
+is a read-only audit of everything above, one line per finding (`ok` / `WARN` /
+`FAIL`, exit 1 if anything failed). `sudo git-deploy-check logrotate` runs one
+section; sections are `user sudo helpers services repos pm2 logrotate cron
+webhook systemd`. Run it after a migration, after `git-deploy-update`, and
+before trusting a reboot. Every check is there because that failure really
+happened while migrating the first two servers and nothing failed loudly:
+
+| Check | The incident |
+|---|---|
+| each logrotate `su` user is the deploy user or `www-data` **and can write that log directory** | pm2 stanzas still said `su <old login>`; rotation would only have failed at night |
+| no pm2 daemon or `~/.pm2` for anyone but the deploy user; the wrapper is installed | a bare `pm2 list` as the admin login started a second, empty daemon |
+| the deploy user can write the directory holding a release worktree's symlink | the first release deploy failed at the swap |
+| Horizon units are ordered `After=` Redis | every shutdown waited out a 90 s stop timeout |
+| bare repos owned by the deploy user, `pre-receive` linked | a leftover remote would not be rejected |
+| no root cron jobs, cron users limited to the deploy user and `www-data` | the same class of stale-login mistake as `su` |
+| no unrestricted sudo rule for the deploy user, `visudo -c` clean | the point of the whole exercise |
+| `webhook.env` not world-readable, only `git-deploy-webhook@<deploy user>` enabled | the listener moved users with a secret in that file |
+
 ## Where each piece lives
 
 | | |

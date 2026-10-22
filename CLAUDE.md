@@ -345,6 +345,7 @@ Non-obvious decisions, don't undo without a reason:
   remote gets a message naming the right URL. No file = no-op. `install.sh`
   links it into every bare repo on our hook; `git-deploy-new` does for new
   ones. The webhook path doesn't push, so it's unaffected.
+- **fixperms and release directories:** in a `RELEASES=1` release `storage` is a symlink into `<base>/shared`, so the helper accepts a symlinked path only if it resolves inside that release's own `shared/` (a real dir) and then works from an fd on `shared/`. Anywhere else a symlinked path is refused. (The old raw `chgrp -R storage` on such a link never touched `shared/storage` at all.)
 - `install.sh --deploy-user NAME` writes `/etc/git-deploy/user` and
   `/etc/sudoers.d/git-deploy` (validated with `visudo -cf`; refuses to
   overwrite on failure); a plain re-run / `git-deploy-update` reuses the

@@ -909,6 +909,16 @@ ln -sfn "$T/fpsecret" "$T/fpwww/fplink"
 check "fixperms: a worktree symlink out of the roots is refused" bash -c "'$PYTHON' '$FPH' '$T/fpwww/fplink' x 2>&1 | grep -q 'allowed root'"
 # ---- release symlink: resolves, and is allowed
 mkdir -p "$T/fpwww/rel.d/releases/r1/storage"; ln -sfn "$T/fpwww/rel.d/releases/r1" "$T/fpwww/relapp"
+# ---- release with storage linked into <base>/shared: followed once, only into this release's shared/
+mkdir -p "$T/fpwww/rel.d/shared/storage/logs" "$T/fpwww/rel.d/releases/r1/other"
+touch "$T/fpwww/rel.d/shared/storage/logs/x.log"; chmod 0600 "$T/fpwww/rel.d/shared/storage/logs/x.log"
+rm -rf "$T/fpwww/rel.d/releases/r1/storage"; ln -sfn "$T/fpwww/rel.d/shared/storage" "$T/fpwww/rel.d/releases/r1/storage"
+ln -sfn "$T/fpsecret" "$T/fpwww/rel.d/releases/r1/evil"
+ln -sfn "$T/fpwww/fpapp/storage" "$T/fpwww/rel.d/releases/r1/otherapp"
+check "fixperms: a release's storage link into shared/ is followed" bash -c "'$PYTHON' '$FPH' '$T/fpwww/relapp' storage 2>/dev/null | grep -qx ok && test \"\$(stat -c %a '$T/fpwww/rel.d/shared/storage/logs/x.log')\" = 660"
+fp_refuses "a link out of the release's shared/" "symlink" "$T/fpwww/relapp" evil
+fp_refuses "a link into another app's tree" "symlink" "$T/fpwww/relapp" otherapp
+check "fixperms: outside a release, a link into a sibling dir is still refused" bash -c "ln -sfn '$FPW/vendor' '$FPW/vlink'; ! '$PYTHON' '$FPH' '$FPW' vlink >/dev/null 2>&1"
 check "fixperms: a RELEASES symlink worktree works" bash -c "'$PYTHON' '$FPH' '$T/fpwww/relapp' storage 2>/dev/null | grep -qx ok"
 
 section "git-deploy-service"

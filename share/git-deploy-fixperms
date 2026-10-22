@@ -21,7 +21,11 @@ this file is the security boundary:
   - each <path> is relative, has no `..`, and every component is opened with
     O_NOFOLLOW relative to an already-open directory fd, so a symlink (or a
     directory swapped for one mid-run) can never redirect it. Symlinks inside
-    the tree are skipped, never followed;
+    the tree are skipped, never followed. The one exception is a release
+    directory (RELEASES=1, docs/releases.md), where `storage` is a link into
+    <base>/shared: a <path> that is a symlink is accepted only if it resolves
+    inside that release's own <base>/shared (a real directory, not a link),
+    and is then opened from a descriptor on shared/ with the same O_NOFOLLOW;
   - it stays on the worktree's filesystem, and only touches regular files and
     directories (hard links to files the deploy user cannot write are already
     refused by the kernel's fs.protected_hardlinks);
@@ -154,6 +158,37 @@ def open_below(root_fd, rel):
         raise
 
 
+def shared_dir(real):
+    """RELEASES=1: real is <base>/releases/<id>; the only place a path may lead
+    through a symlink is <base>/shared. Returns its real path, or None."""
+    releases = os.path.dirname(real)
+    if os.path.basename(releases) != "releases":
+        return None
+    shared = os.path.join(os.path.dirname(releases), "shared")
+    if os.path.islink(shared) or not os.path.isdir(shared):
+        return None
+    return os.path.realpath(shared)
+
+
+def open_path(root_fd, real, shared, rel):
+    """Open directory rel under the worktree; a link into shared/ is followed
+    once, by resolving it here and reopening it NOFOLLOW below shared/."""
+    try:
+        return open_below(root_fd, rel)
+    except OSError as e:
+        if e.errno not in (errno.ELOOP, errno.ENOTDIR) or not shared:
+            raise
+    target = os.path.realpath(os.path.join(real, rel))
+    if target != shared and not target.startswith(shared + "/"):
+        raise OSError(errno.ELOOP, "outside shared")
+    sfd = os.open(shared, DIR_FLAGS)
+    try:
+        sub = os.path.relpath(target, shared)
+        return os.dup(sfd) if sub == "." else open_below(sfd, sub)
+    finally:
+        os.close(sfd)
+
+
 def cmd_fix(worktree, paths):
     if not 1 <= len(paths) <= MAX_PATHS:
         raise Refused("expected 1 to %d paths" % MAX_PATHS)
@@ -162,12 +197,12 @@ def cmd_fix(worktree, paths):
             raise Refused("unsafe path %r (relative, no .. or .)" % p)
     real = check_worktree(worktree)
     name, gid = web_gid()
+    shared = shared_dir(real)
     root_fd = os.open(real, DIR_FLAGS)
     try:
-        dev = os.fstat(root_fd).st_dev
         for p in paths:
             try:
-                fd = open_below(root_fd, p)
+                fd = open_path(root_fd, real, shared, p)
             except FileNotFoundError:
                 say("%s: does not exist, skipped" % p)
                 continue
@@ -176,7 +211,7 @@ def cmd_fix(worktree, paths):
                     raise Refused("%s is a symlink or not a directory" % p)
                 raise
             try:
-                n = walk(fd, dev, gid)
+                n = walk(fd, os.fstat(fd).st_dev, gid)
             finally:
                 os.close(fd)
             say("%s: group %s, ug+rw, dirs setgid (%d entr%s changed)" % (p, name, n, "y" if n == 1 else "ies"))

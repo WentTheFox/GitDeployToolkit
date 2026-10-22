@@ -31,7 +31,7 @@ helper takes arguments a pushed repo controls, so each validates its own:
 | Helper | Replaces in `deploy.conf` | Allowed |
 |---|---|---|
 | `git-deploy-service <action> <unit>.service` | `sudo systemctl restart/reload …` | only actions and unit patterns listed in `/etc/git-deploy/services` (root-owned) |
-| `git-deploy-fixperms <worktree> <path>...` | `sudo chgrp -R`, `chmod -R ug+rw`, `find … -exec chmod g+s` | group := web group, `ug+rw`, dirs setgid, under a worktree inside `/etc/git-deploy/fixperms.roots` (default `/var/www`, `/var/node`); never follows symlinks |
+| `git-deploy-fixperms <worktree> <path>...` | `sudo chgrp -R`, `chmod -R ug+rw`, `find … -exec chmod g+s` | group := web group, `ug+rw`, dirs setgid, under a worktree inside `/etc/git-deploy/fixperms.roots` (default `/var/www`, `/var/node`); never follows symlinks, except a release's link into its own `shared/` |
 | `git-deploy-logrotate`, `git-deploy-cron` | (already helpers) | unchanged |
 
 Why helpers rather than sudoers lines: a sudoers `*` matches spaces, so

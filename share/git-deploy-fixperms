@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Give the web server's group access to parts of an app's worktree, for the
+shared post-receive hook's deploy.conf. See docs/deploy-user.md.
+
+  git-deploy-fixperms <worktree> <path>...
+
+Replaces the `sudo chgrp -R` / `sudo chmod -R` / `sudo find -exec chmod g+s`
+lines a deploy.conf used to need after regenerating storage/ or
+bootstrap/cache/. Those commands cannot be allowed in sudoers without handing
+the deploy user root (a free-form `chmod -R` or `find -exec` is a root shell),
+so this root-owned helper does the same fixed thing instead:
+
+  for every file and directory under each <path> (relative to the worktree):
+    group := the web group (default www-data), mode |= ug+rw, and
+    directories also get the setgid bit, so new files inherit the group.
+
+It runs as root through a sudoers rule, with arguments a repo controls, so
+this file is the security boundary:
+  - the worktree must be inside an allowed root (/etc/git-deploy/fixperms.roots,
+    one per line; default /var/www and /var/node), and not be a root itself;
+  - each <path> is relative, has no `..`, and every component is opened with
+    O_NOFOLLOW relative to an already-open directory fd, so a symlink (or a
+    directory swapped for one mid-run) can never redirect it. Symlinks inside
+    the tree are skipped, never followed;
+  - it stays on the worktree's filesystem, and only touches regular files and
+    directories (hard links to files the deploy user cannot write are already
+    refused by the kernel's fs.protected_hardlinks);
+  - it never changes the owner, never removes bits, never executes anything.
+
+stdout: one word, ok | refused. stderr: human-readable lines. Exit 0 unless
+refused (1) or misused (2).
+
+Test/override knobs (ignored by sudo's env_reset in production):
+  GIT_DEPLOY_FIXPERMS_ROOTS (colon list), GIT_DEPLOY_FIXPERMS_GROUP.
+"""
+import errno, grp, os, re, stat, sys
+
+ROOTS_FILE = "/etc/git-deploy/fixperms.roots"
+GROUP_FILE = "/etc/git-deploy/fixperms.group"
+DEFAULT_ROOTS = ["/var/www", "/var/node"]
+DEFAULT_GROUP = "www-data"
+PATH_RE = re.compile(r"^/[A-Za-z0-9._/+-]*$")
+REL_RE = re.compile(r"^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$")
+MAX_PATHS = 8
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class Refused(Exception):
+    pass
+
+
+def say(msg):
+    print("git-deploy: fixperms: " + msg, file=sys.stderr)
+
+
+def allowed_roots():
+    env = os.environ.get("GIT_DEPLOY_FIXPERMS_ROOTS")
+    if env:
+        roots = env.split(":")
+    elif os.path.isfile(ROOTS_FILE):
+        roots = [l.strip() for l in open(ROOTS_FILE) if l.strip() and not l.startswith("#")]
+    else:
+        roots = DEFAULT_ROOTS
+    return [os.path.realpath(r) for r in roots]
+
+
+def web_gid():
+    name = os.environ.get("GIT_DEPLOY_FIXPERMS_GROUP")
+    if not name and os.path.isfile(GROUP_FILE):
+        name = open(GROUP_FILE).readline().strip()
+    name = name or DEFAULT_GROUP
+    try:
+        return name, grp.getgrnam(name).gr_gid
+    except KeyError:
+        raise Refused("no such group %r" % name)
+
+
+def check_worktree(worktree):
+    if not PATH_RE.match(worktree) or ".." in worktree.split("/"):
+        raise Refused("unsafe worktree path")
+    # RELEASES=1 makes the worktree a symlink to the live release: resolve it.
+    real = os.path.realpath(worktree)
+    for root in allowed_roots():
+        if real != root and real.startswith(root.rstrip("/") + "/"):
+            return real
+    raise Refused("worktree is not inside an allowed root (%s)" % ", ".join(allowed_roots()))
+
+
+def fix(fd, st, gid, is_dir):
+    """Apply the fixed change to an open fd. Returns 1 if anything changed."""
+    want = stat.S_IMODE(st.st_mode) | 0o660 | (0o2000 if is_dir else 0)
+    changed = 0
+    if st.st_gid != gid:
+        os.fchown(fd, -1, gid)
+        changed = 1
+        # chown clears setgid on some filesystems; read the mode again below
+        st = os.fstat(fd)
+        want = stat.S_IMODE(st.st_mode) | 0o660 | (0o2000 if is_dir else 0)
+    if stat.S_IMODE(st.st_mode) != want:
+        os.fchmod(fd, want)
+        changed = 1
+    return changed
+
+
+def walk(dfd, dev, gid, depth=0):
+    """Fix the directory behind dfd and everything below it. Returns files changed."""
+    if depth > 200:
+        raise Refused("directory tree nested deeper than 200 levels")
+    st = os.fstat(dfd)
+    n = fix(dfd, st, gid, True)
+    for name in os.listdir(dfd):
+        try:
+            est = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # removed under us (a running app); nothing to fix
+        if est.st_dev != dev:
+            continue
+        try:
+            if stat.S_ISDIR(est.st_mode):
+                cfd = os.open(name, DIR_FLAGS, dir_fd=dfd)
+                try:
+                    n += walk(cfd, dev, gid, depth + 1)
+                finally:
+                    os.close(cfd)
+            elif stat.S_ISREG(est.st_mode):
+                # O_NONBLOCK so a fifo swapped in cannot hang us; fstat proves it is a file.
+                ffd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+                try:
+                    fst = os.fstat(ffd)
+                    if stat.S_ISREG(fst.st_mode) and fst.st_dev == dev:
+                        n += fix(ffd, fst, gid, False)
+                finally:
+                    os.close(ffd)
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # raced with a deploy-side rename; the next deploy fixes it
+        except OSError as e:
+            if e.errno == errno.ELOOP:  # swapped for a symlink after the stat: skipped
+                continue
+            raise
+    return n
+
+
+def open_below(root_fd, rel):
+    """Open directory rel (a/b/c) under root_fd without following a symlink."""
+    fd = os.dup(root_fd)
+    try:
+        for part in rel.split("/"):
+            nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def cmd_fix(worktree, paths):
+    if not 1 <= len(paths) <= MAX_PATHS:
+        raise Refused("expected 1 to %d paths" % MAX_PATHS)
+    for p in paths:
+        if not REL_RE.match(p) or ".." in p.split("/") or "." in p.split("/"):
+            raise Refused("unsafe path %r (relative, no .. or .)" % p)
+    real = check_worktree(worktree)
+    name, gid = web_gid()
+    root_fd = os.open(real, DIR_FLAGS)
+    try:
+        dev = os.fstat(root_fd).st_dev
+        for p in paths:
+            try:
+                fd = open_below(root_fd, p)
+            except FileNotFoundError:
+                say("%s: does not exist, skipped" % p)
+                continue
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Refused("%s is a symlink or not a directory" % p)
+                raise
+            try:
+                n = walk(fd, dev, gid)
+            finally:
+                os.close(fd)
+            say("%s: group %s, ug+rw, dirs setgid (%d entr%s changed)" % (p, name, n, "y" if n == 1 else "ies"))
+    finally:
+        os.close(root_fd)
+
+
+def main(argv):
+    if len(argv) < 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        cmd_fix(argv[1], argv[2:])
+    except Refused as e:
+        say("refused (%s)" % e)
+        print("refused")
+        return 1
+    except RecursionError:
+        say("refused (directory tree too deep)")
+        print("refused")
+        return 1
+    print("ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

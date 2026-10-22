@@ -1,0 +1,126 @@
+# A dedicated deploy user
+
+Until now the "deploy user" on a server was the admin's own login: full
+`NOPASSWD:ALL` sudo, owner of the pm2 daemon, the bare repos and the
+worktrees, and the account every `git push deploy` and the webhook listener
+ran as. Anyone who could push to an app, or steal the SSH key / GitHub token
+that deploys, was effectively root.
+
+This splits the roles. A server gets one unprivileged account (call it
+`deploy`) that owns everything the toolkit touches and may run **only** the
+root commands deploys need. The admin login stays an admin login.
+
+## What the deploy user can do as root
+
+`install.sh --deploy-user deploy` writes `/etc/sudoers.d/git-deploy`
+(validated with `visudo -cf`, regenerated on every run, so edit
+`/etc/git-deploy/*`, not that file):
+
+```
+deploy ALL=(root) NOPASSWD: \
+    /usr/local/lib/git-deploy/git-deploy-service *, \
+    /usr/local/lib/git-deploy/git-deploy-fixperms *, \
+    /usr/local/lib/git-deploy/git-deploy-logrotate install *, \
+    /usr/local/lib/git-deploy/git-deploy-cron install *
+deploy ALL=(www-data) NOPASSWD: ALL
+```
+
+Nothing else: no `systemctl`, `chmod`, `chgrp`, `find`, shell or editor. Each
+helper takes arguments a pushed repo controls, so each validates its own:
+
+| Helper | Replaces in `deploy.conf` | Allowed |
+|---|---|---|
+| `git-deploy-service <action> <unit>.service` | `sudo systemctl restart/reload …` | only actions and unit patterns listed in `/etc/git-deploy/services` (root-owned) |
+| `git-deploy-fixperms <worktree> <path>...` | `sudo chgrp -R`, `chmod -R ug+rw`, `find … -exec chmod g+s` | group := web group, `ug+rw`, dirs setgid, under a worktree inside `/etc/git-deploy/fixperms.roots` (default `/var/www`, `/var/node`); never follows symlinks |
+| `git-deploy-logrotate`, `git-deploy-cron` | (already helpers) | unchanged |
+
+Why helpers rather than sudoers lines: a sudoers `*` matches spaces, so
+`chmod -R * storage` is `chmod -R 4777 /etc/shadow` away from root, and
+`find -exec` and `systemctl edit` are root shells by design. A static rule per
+literal command works but cannot express "recursive, but only below this
+worktree". Fixed behavior in a validated, tested script can.
+
+**The `www-data` rule is code execution as `www-data`, on purpose.**
+`artisan`, `composer`, `pnpm`, `nice` and `find` can each run arbitrary
+commands, so listing them would only look like a restriction. A deploy ships
+code that `www-data` runs anyway. It is not root, and `www-data` has no sudo.
+
+What this does **not** protect against: someone who can push to an app can
+still run code as the deploy user and as `www-data` (that is what a deploy is).
+It limits the blast radius to those two accounts, away from root, the admin's
+files and other users.
+
+## Rejecting pushes from anyone else
+
+`/etc/git-deploy/user` holds the deploy user's name. The shared `pre-receive`
+hook (symlinked into every bare repo by `install.sh` and `git-deploy-new`)
+refuses any push made as another user *before any ref moves*, naming the
+correct remote:
+
+```
+git-deploy: push REJECTED — you pushed as 'admin', but this server deploys as 'deploy'.
+  Fix your remote:  git remote set-url deploy ssh://deploy@<this-host>/srv/git/myapp.git
+```
+
+So a forgotten clone still pointing at the old admin login fails loudly. The
+bare repos are also owned by `deploy`, so the old login usually cannot write
+them directly either; the hook is for the clear message. The GitHub webhook path does not push and is unaffected.
+
+## Migrating a server (runbook)
+
+Do one server at a time, in a maintenance window you are happy with: every
+pm2 process restarts once, and each app is briefly owned by someone mid-move.
+`OLD` is the current admin/deploy login, `deploy` the new user.
+
+1. **Create the user** (no password, no sudo, in `www-data` so it can read what
+   the web server writes):
+   `adduser --disabled-password --gecos '' deploy && usermod -aG www-data deploy`.
+   Node, pnpm, composer and php are system-wide on these servers; check
+   `sudo -u deploy bash -lc 'command -v node pnpm composer php pm2'`.
+   Copy the `authorized_keys` that push today to `~deploy/.ssh/`.
+2. **Install**, as root: `./install.sh --deploy-user deploy` (via
+   `git-deploy-update` afterwards). Fill `/etc/git-deploy/services` from the
+   units the apps' `deploy.conf` restart (`reload php*-fpm.service`,
+   `restart <app>-horizon.service`). Nothing is enforced yet: `OLD` still has
+   full sudo and still owns everything.
+3. **Port every `deploy.conf`** (in each app's repo) to the helpers:
+   `sudo -n /usr/local/lib/git-deploy/git-deploy-fixperms "$WORKTREE" storage bootstrap/cache`
+   (and `vendor`), `sudo -n …/git-deploy-service restart X.service`. Push those
+   as `OLD` while that still works. A `deploy.conf` that still calls
+   `sudo systemctl` or `sudo chmod` fails under `deploy` with a sudo error.
+   Update `deploy.cron` entries that run as `OLD` to run as `deploy`.
+4. **Move ownership** (per app, then the server-wide pieces):
+   - `pm2 save` and `pm2 kill` as `OLD`; `systemctl disable pm2-OLD`; as
+     `deploy` start the apps from their `pm2.json`/ecosystem files, `pm2 save`,
+     then `pm2 startup systemd -u deploy --hp /home/deploy` and run what it
+     prints. Processes that were started by hand need their start command.
+   - `chown -R deploy:deploy /srv/git/*.git` and each worktree. Where a worktree
+     has `www-data`-owned `storage/` etc., chown only what `OLD` owned
+     (`find <wt> -user OLD -exec chown deploy {} +` with `-xdev`), then run
+     `git-deploy-fixperms` once per Laravel app.
+   - `chown root:deploy /etc/git-deploy/webhook.env` (mode 640);
+     `systemctl disable --now git-deploy-webhook@OLD && systemctl enable --now git-deploy-webhook@deploy`.
+   - Move `OLD`'s deploy-related home files the deploy needs (pm2 dump is
+     regenerated; the GitHub deploy-key clone of the toolkit is root's).
+5. **Verify before locking down**: for each app, `sudo -u deploy` runs a
+   same-commit redeploy (`echo "$sha $sha refs/heads/main" | …/post-receive`
+   from the bare repo) and the app still serves; one real `git push deploy`;
+   one webhook button deploy.
+6. **Point your clones at the new user** (every local copy, every machine):
+   `git remote set-url deploy ssh://deploy@<host>/srv/git/<app>.git`.
+   Any clone you miss is rejected by `pre-receive` with the line above.
+7. **Lock down**: remove `OLD`'s `NOPASSWD:ALL` (keep a password-protected or
+   key-guarded admin path first; test `sudo -n true` fails and `sudo -v` works
+   in a second session *before* closing the first). Remove `OLD`'s own
+   `git-deploy-*` sudoers files.
+
+Rollback: until step 7, re-point `/etc/git-deploy/user` and the units at `OLD`.
+
+## Where each piece lives
+
+| | |
+|---|---|
+| `/etc/git-deploy/user` | the deploy user's name; read by `pre-receive`, `git-deploy-new` and `install.sh` |
+| `/etc/git-deploy/services` | `git-deploy-service` allow-list |
+| `/etc/git-deploy/fixperms.{roots,group}` | optional overrides for `git-deploy-fixperms` |
+| `/etc/sudoers.d/git-deploy` | generated by `install.sh` |

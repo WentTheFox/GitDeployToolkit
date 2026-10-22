@@ -11,6 +11,13 @@ set -euo pipefail
 
 TOOLKIT_LIB="${GIT_DEPLOY_LIB:-/usr/local/lib/git-deploy}"
 REPO_ROOT="${GIT_DEPLOY_REPO_ROOT:-/srv/git}"
+ETC_DIR="${GIT_DEPLOY_ETC:-/etc/git-deploy}"
+
+# The server's dedicated deploy user (install.sh --deploy-user) owns everything
+# and is who pushes; otherwise fall back to whoever ran sudo, as before.
+OWNER=""
+[[ -f "$ETC_DIR/user" ]] && OWNER="$(head -n1 "$ETC_DIR/user")"
+[[ -n "$OWNER" ]] || OWNER="${SUDO_USER:-}"
 
 APP_NAME="${1:?Usage: git-deploy-new <app-name> [worktree-path] [branch]}"
 WORKTREE="${2:-/var/www/$APP_NAME}"
@@ -43,6 +50,8 @@ BRANCH=$BRANCH
 EOF
 
 ln -sf "$TOOLKIT_LIB/post-receive" "$BARE_REPO/hooks/post-receive"
+# Refuses pushes from anyone but the deploy user (a no-op until one is set).
+[[ -f "$TOOLKIT_LIB/pre-receive" ]] && ln -sf "$TOOLKIT_LIB/pre-receive" "$BARE_REPO/hooks/pre-receive"
 chmod +x "$TOOLKIT_LIB/post-receive"
 
 # This is typically run via sudo (it writes under /srv and /usr/local),
@@ -51,17 +60,17 @@ chmod +x "$TOOLKIT_LIB/post-receive"
 # root-owned files into what should be the app's own worktree, and any
 # `pm2 restart` in deploy_restart targets root's pm2 daemon instead of
 # the one actually running the app, so the restart silently no-ops.
-# Chown to $SUDO_USER (the person who ran sudo) so pushes/deploys happen
+# Chown to $OWNER (the deploy user, or the person who ran sudo) so pushes/deploys happen
 # as the actual app owner instead.
 # An already-existing worktree (migrating a live app) is left alone: it
 # can hold deliberately www-data-owned/grouped dirs (storage/, uploads)
 # that a recursive chown would take away from the web server.
-if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-  chown -R "$SUDO_USER:$SUDO_USER" "$BARE_REPO"
-  echo "git-deploy-new: chowned $BARE_REPO to $SUDO_USER"
+if [[ -n "$OWNER" && "$OWNER" != "root" ]]; then
+  chown -R "$OWNER:$(id -gn "$OWNER")" "$BARE_REPO"
+  echo "git-deploy-new: chowned $BARE_REPO to $OWNER"
   if [[ "$WORKTREE_EXISTED" == 0 ]]; then
-    chown "$SUDO_USER:$SUDO_USER" "$WORKTREE"
-    echo "git-deploy-new: chowned new worktree $WORKTREE to $SUDO_USER"
+    chown "$OWNER:$(id -gn "$OWNER")" "$WORKTREE"
+    echo "git-deploy-new: chowned new worktree $WORKTREE to $OWNER"
   else
     echo "git-deploy-new: $WORKTREE already existed, left its ownership alone"
   fi
@@ -71,7 +80,7 @@ echo "git-deploy-new: created $BARE_REPO"
 echo "git-deploy-new: worktree -> $WORKTREE (branch: $BRANCH)"
 echo
 echo "On your dev machine:"
-echo "  git remote add deploy ssh://$(whoami)@$(hostname -f 2>/dev/null || hostname)$BARE_REPO"
+echo "  git remote add deploy ssh://${OWNER:-$(whoami)}@$(hostname -f 2>/dev/null || hostname)$BARE_REPO"
 echo "  git push deploy $BRANCH"
 echo
 echo "In the app's repo, copy template/deploy.conf.example to deploy.conf,"

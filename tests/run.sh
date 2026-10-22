@@ -50,10 +50,12 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh share/pre-receive; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
+check "git-deploy-fixperms parses" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-fixperms"
+check "git-deploy-service parses" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-service"
 check "git-deploy-cron parses" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-cron"
 check "hooks.json is valid JSON once templated" \
   "$PYTHON" -c 'import json,sys; json.loads(open(sys.argv[1]).read().replace("{{ getenv \"GIT_DEPLOY_WEBHOOK_SECRET\" }}","x"))' "$ROOT/share/webhook-hooks.json"
@@ -64,7 +66,9 @@ done
 # --- fixture ------------------------------------------------------------
 
 cd "$T"
-mkdir -p srv logs
+mkdir -p srv logs etc
+# Never read the real /etc/git-deploy of whoever runs the tests.
+export GIT_DEPLOY_ETC="$T/etc"
 git init -q --bare origin.git
 git init -q -b main dev
 (
@@ -869,6 +873,88 @@ check "cron: installs for a release symlink" test "$(printf '0 1 * * * %s php -f
 check "cron: the job names the symlink, not the release" bash -c "grep -q 'php -f $CRR/a.php' '$CRD/git-deploy-crrel' && ! grep -q releases '$CRD/git-deploy-crrel'"
 ln -sfn "$CRB/releases/r2" "$CRR"
 check "cron: unchanged after the next release" test "$(printf '0 1 * * * %s php -f @WORKTREE@/a.php\n' "$ME" | cr install crrel "$CRR")" = unchanged
+
+# --- dedicated deploy user ------------------------------------------------
+
+section "git-deploy-fixperms"
+FPH="$ROOT/share/git-deploy-fixperms"
+FPW="$T/fpwww/fpapp"; mkdir -p "$FPW/storage/logs" "$FPW/storage/framework" "$FPW/bootstrap/cache" "$FPW/vendor" "$T/fpsecret"
+export GIT_DEPLOY_FIXPERMS_ROOTS="$T/fpwww" GIT_DEPLOY_FIXPERMS_GROUP="$MYGRP"
+fp() { "$PYTHON" "$FPH" "$@" 2> fp.err; }
+touch "$FPW/storage/logs/laravel.log" "$FPW/bootstrap/cache/a.php"
+chmod 0600 "$FPW/storage/logs/laravel.log"; chmod 0755 "$FPW/storage" "$FPW/storage/logs"
+echo secret > "$T/fpsecret/s"; chmod 0600 "$T/fpsecret/s"
+ln -s "$T/fpsecret/s" "$FPW/storage/link-to-secret"; ln -s "$T/fpsecret" "$FPW/storage/dir-link"
+out=$(fp "$FPW" storage bootstrap/cache || true)
+check "fixperms: ok" test "$out" = ok
+check "fixperms: file becomes ug+rw" test "$(stat -c %a "$FPW/storage/logs/laravel.log")" = 660
+check "fixperms: directories get setgid and ug+rw" test "$(stat -c %a "$FPW/storage/logs")" = 2775
+check "fixperms: a symlink to a file elsewhere is not followed" test "$(stat -c %a "$T/fpsecret/s")" = 600
+check "fixperms: a symlinked directory is not followed" test "$(stat -c %a "$T/fpsecret")" = 755 -o "$(stat -c %a "$T/fpsecret")" = 775
+check "fixperms: second run changes nothing" bash -c "'$PYTHON' '$FPH' '$FPW' storage bootstrap/cache 2>&1 | grep -c '(0 entries changed)' | grep -q 2"
+fp_refuses() { # fp_refuses <description> <error substring> <args...>
+  local d="$1" sub="$2"; shift 2
+  local out; out=$(fp "$@" || true)
+  if [[ "$out" == refused ]] && grep -q -- "$sub" fp.err; then ok "fixperms refuses $d"; else not_ok "fixperms refuses $d" "$(cat fp.err) [out=$out]"; fi
+}
+fp_refuses "a .. path" "unsafe path" "$FPW" ../fpsecret
+fp_refuses "an absolute path" "unsafe path" "$FPW" /etc
+fp_refuses "a path that is a symlink" "symlink" "$FPW" storage/dir-link
+fp_refuses "a worktree outside the roots" "allowed root" "$T/fpsecret" x
+fp_refuses "the root itself" "allowed root" "$T/fpwww" x
+fp_refuses "a worktree with .." "unsafe worktree" "$FPW/../fpapp" storage
+check "fixperms: an unknown group is refused" bash -c "GIT_DEPLOY_FIXPERMS_GROUP=nosuchgroup_x '$PYTHON' '$FPH' '$FPW' storage 2>&1 | grep -q 'no such group'"
+check "fixperms: a missing path is skipped, not fatal" bash -c "'$PYTHON' '$FPH' '$FPW' nope 2>&1 | grep -q 'does not exist, skipped'"
+ln -sfn "$T/fpsecret" "$T/fpwww/fplink"
+check "fixperms: a worktree symlink out of the roots is refused" bash -c "'$PYTHON' '$FPH' '$T/fpwww/fplink' x 2>&1 | grep -q 'allowed root'"
+# ---- release symlink: resolves, and is allowed
+mkdir -p "$T/fpwww/rel.d/releases/r1/storage"; ln -sfn "$T/fpwww/rel.d/releases/r1" "$T/fpwww/relapp"
+check "fixperms: a RELEASES symlink worktree works" bash -c "'$PYTHON' '$FPH' '$T/fpwww/relapp' storage 2>/dev/null | grep -qx ok"
+
+section "git-deploy-service"
+SVH="$ROOT/share/git-deploy-service"
+cat > "$T/fakesystemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "$FAKE_SYSTEMCTL_LOG"
+SYSTEMCTL
+chmod +x "$T/fakesystemctl"
+export SYSTEMCTL_BIN="$T/fakesystemctl" FAKE_SYSTEMCTL_LOG="$T/systemctl.log" GIT_DEPLOY_SERVICES_FILE="$T/services" GIT_DEPLOY_SERVICES_ANY_OWNER=1
+printf '# comment\nreload php*-fpm.service\nrestart,try-restart myapp-horizon.service\n' > "$T/services"; chmod 0644 "$T/services"
+sv() { : > "$FAKE_SYSTEMCTL_LOG"; "$PYTHON" "$SVH" "$@" 2> sv.err; }
+svran() { grep -qxF "systemctl $1" "$FAKE_SYSTEMCTL_LOG"; }
+sv reload php8.5-fpm.service; check "service: a globbed reload runs" svran "reload -- php8.5-fpm.service"
+sv restart myapp-horizon.service; check "service: an exact restart runs" svran "restart -- myapp-horizon.service"
+sv_refuses() { # sv_refuses <description> <args...>
+  local d="$1"; shift
+  if sv "$@"; then not_ok "service refuses $d" "ran: $(cat "$FAKE_SYSTEMCTL_LOG")"
+  elif [[ -s "$FAKE_SYSTEMCTL_LOG" ]]; then not_ok "service refuses $d" "systemctl was called"; else ok "service refuses $d"; fi
+}
+sv_refuses "an action the unit's rule lacks" restart php8.5-fpm.service
+sv_refuses "an unlisted unit" restart ssh.service
+sv_refuses "a stop" stop myapp-horizon.service
+sv_refuses "an option instead of a unit" reload --signal=KILL
+sv_refuses "a glob character smuggled in the unit" reload 'php*-fpm.service'
+sv_refuses "two units in one argument" reload 'php8.5-fpm.service ssh.service'
+sv_refuses "a unit without .service" reload php8.5-fpm
+chmod 0666 "$T/services"; sv_refuses "a world-writable allow-list" reload php8.5-fpm.service; chmod 0644 "$T/services"
+mv "$T/services" "$T/services.gone"; sv_refuses "a missing allow-list" reload php8.5-fpm.service; mv "$T/services.gone" "$T/services"
+check "service: without the test knob a non-root-owned list is refused" bash -c "[ \"\$(id -u)\" = 0 ] || ! env -u GIT_DEPLOY_SERVICES_ANY_OWNER '$PYTHON' '$SVH' reload php8.5-fpm.service 2>/dev/null"
+unset SYSTEMCTL_BIN FAKE_SYSTEMCTL_LOG GIT_DEPLOY_SERVICES_FILE GIT_DEPLOY_SERVICES_ANY_OWNER GIT_DEPLOY_FIXPERMS_ROOTS GIT_DEPLOY_FIXPERMS_GROUP
+
+section "pre-receive: only the deploy user may push"
+# git-deploy-new linked the hook; with no /etc/git-deploy/user it allows everyone
+check "pre-receive is linked into new bare repos" test -L "$BARE/hooks/pre-receive"
+check "no deploy user configured: pushes are accepted" bash -c "cd '$T/dev' && git commit -q --allow-empty -m open && git push -q ../srv/app.git main"
+printf 'someone-else\n' > "$GIT_DEPLOY_ETC/user"
+before=$(git --git-dir="$BARE" rev-parse main)
+(cd "$T/dev" && git commit -q --allow-empty -m "rejected" && git push ../srv/app.git main) > push.out 2>&1 || true
+check "a push as another user is rejected" test "$(git --git-dir="$BARE" rev-parse main)" = "$before"
+check "the rejection names the right remote" grep -q "ssh://someone-else@<this-host>/srv/git/app.git" push.out
+check "the rejection says who pushed" grep -q "pushed as '$ME'" push.out
+printf '%s\n' "$ME" > "$GIT_DEPLOY_ETC/user"
+check "a push as the configured deploy user is accepted" bash -c "cd '$T/dev' && git push -q ../srv/app.git main"
+check "git-deploy-new chowns to the configured user (and prints its remote)" bash -c "GIT_DEPLOY_LIB='$ROOT/share' GIT_DEPLOY_REPO_ROOT='$T/srv' '$ROOT/bin/git-deploy-new' owner-app '$T/www/owner-app' | grep -q 'ssh://$ME@'"
+rm -f "$GIT_DEPLOY_ETC/user"
 
 echo
 echo "$PASSED passed, $FAILED failed"

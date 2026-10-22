@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Shared pre-receive hook: once a server has a dedicated deploy user
+# (/etc/git-deploy/user, written by install.sh --deploy-user), refuse any push
+# made as someone else, before any ref moves. A leftover remote that still
+# says ssh://<old-admin-user>@host/... then fails loudly with the right URL
+# instead of deploying as the wrong user (or half-failing on permissions).
+# See docs/deploy-user.md. No file = no deploy user configured = allow.
+
+set -euo pipefail
+
+USER_FILE="${GIT_DEPLOY_ETC:-/etc/git-deploy}/user"
+[[ -f "$USER_FILE" ]] || exit 0
+want="$(head -n1 "$USER_FILE")"
+[[ -n "$want" ]] || exit 0
+me="$(id -un)"
+[[ "$me" == "$want" ]] && exit 0
+
+repo="$(basename "$(git rev-parse --absolute-git-dir)")"
+{
+  echo
+  echo "git-deploy: push REJECTED — you pushed as '$me', but this server deploys as '$want'."
+  echo "  Fix your remote:  git remote set-url deploy ssh://$want@<this-host>/srv/git/$repo"
+  echo
+} >&2
+exit 1

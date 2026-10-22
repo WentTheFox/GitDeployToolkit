@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Restart or reload a systemd service for a deploy, as root, but only the
+services this server's admin listed. See docs/deploy-user.md.
+
+  git-deploy-service <restart|reload|try-restart|reload-or-restart> <unit>.service
+
+Replaces `sudo systemctl restart <unit>` in a deploy.conf. A sudoers rule for
+`systemctl restart *` is root (restart any unit, or `edit` one); a rule per
+unit works but has to be regenerated whenever an app adds a worker. This
+helper has one static sudoers rule and reads the allow-list instead:
+
+  /etc/git-deploy/services   root-owned, not writable by anyone else
+  one rule per line:  <action>[,<action>...] <unit-pattern>
+      reload php*-fpm.service
+      restart,try-restart luna-horizon.service
+
+Unit patterns allow only letters, digits and @ : _ . - plus * and ? globs.
+A missing, unsafe or group/world-writable file allows nothing. The unit and
+action are validated before anything runs, and systemctl is called with the
+unit after `--` so it can never be read as an option.
+
+stdout/stderr: systemctl's own. Exit: systemctl's, or 1 refused / 2 misused.
+
+Test/override knobs (ignored by sudo's env_reset in production):
+  GIT_DEPLOY_SERVICES_FILE, SYSTEMCTL_BIN, GIT_DEPLOY_SERVICES_ANY_OWNER=1
+  (skip the root-ownership check, for tests only).
+"""
+import fnmatch, os, re, stat, subprocess, sys
+
+SERVICES_FILE = os.environ.get("GIT_DEPLOY_SERVICES_FILE", "/etc/git-deploy/services")
+SYSTEMCTL = os.environ.get("SYSTEMCTL_BIN", "/usr/bin/systemctl")
+ACTIONS = {"restart", "reload", "try-restart", "reload-or-restart"}
+UNIT_RE = re.compile(r"^[A-Za-z0-9@:_.-]+\.service$")
+PATTERN_RE = re.compile(r"^[A-Za-z0-9@:_.*?-]+$")
+
+
+class Refused(Exception):
+    pass
+
+
+def say(msg):
+    print("git-deploy: service: " + msg, file=sys.stderr)
+
+
+def rules():
+    try:
+        st = os.stat(SERVICES_FILE)
+    except FileNotFoundError:
+        raise Refused("%s does not exist, so no service may be restarted" % SERVICES_FILE)
+    if not os.environ.get("GIT_DEPLOY_SERVICES_ANY_OWNER") and st.st_uid != 0:
+        raise Refused("%s is not owned by root" % SERVICES_FILE)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise Refused("%s is writable by group or others" % SERVICES_FILE)
+    out = []
+    for no, raw in enumerate(open(SERVICES_FILE), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2 or not set(parts[0].split(",")) <= ACTIONS or not PATTERN_RE.match(parts[1]):
+            raise Refused("%s line %d is malformed" % (SERVICES_FILE, no))
+        out.append((set(parts[0].split(",")), parts[1]))
+    return out
+
+
+def main(argv):
+    if len(argv) != 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+    action, unit = argv[1], argv[2]
+    try:
+        if action not in ACTIONS:
+            raise Refused("action %r is not allowed" % action)
+        if not UNIT_RE.match(unit):
+            raise Refused("%r is not a unit name (letters, digits, @:_.- and a .service suffix)" % unit)
+        if not any(action in acts and fnmatch.fnmatchcase(unit, pat) for acts, pat in rules()):
+            raise Refused("%s %s is not listed in %s" % (action, unit, SERVICES_FILE))
+    except Refused as e:
+        say("refused (%s)" % e)
+        return 1
+    return subprocess.call([SYSTEMCTL, action, "--", unit])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

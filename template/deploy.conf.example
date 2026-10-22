@@ -23,7 +23,7 @@ deploy_build() {
 }
 
 deploy_restart() {
-  sudo systemctl restart php-fpm-myapp
+  sudo -n /usr/local/lib/git-deploy/git-deploy-service restart php-fpm-myapp.service
 }
 
 # --- Node / pm2 example -----------------------------------------------
@@ -64,15 +64,18 @@ deploy_restart() {
 # }
 # deploy_restart() {
 #   php artisan migrate --force     # after the swap
-#   sudo systemctl reload php8.3-fpm
+#   sudo -n /usr/local/lib/git-deploy/git-deploy-service reload php8.3-fpm.service
 # }
 # # Only for a rollback: restart for the release being returned to. Never
 # # migrate here. Without it, git-deploy-rollback just swaps the symlink.
 # deploy_rollback() {
-#   sudo systemctl reload php8.3-fpm
+#   sudo -n /usr/local/lib/git-deploy/git-deploy-service reload php8.3-fpm.service
 # }
 
 # Notes on sudo:
-# deploy_restart commands that need root (systemctl, etc.) require the
-# deploy user to have passwordless sudo for exactly that command. See
-# README.md for a sudoers snippet that scopes this narrowly.
+# On a server with a dedicated deploy user (README "sudo, and a dedicated
+# deploy user") root commands go through the toolkit's helpers, not raw
+# systemctl/chmod/chgrp: git-deploy-service (units listed in
+# /etc/git-deploy/services) and git-deploy-fixperms <worktree> <paths>
+# (replaces chgrp/chmod/find on storage, bootstrap/cache, vendor). Running as
+# the web user is `sudo -n -u www-data ...`. See docs/deploy-user.md.

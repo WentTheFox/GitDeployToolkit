@@ -314,6 +314,42 @@ Non-obvious decisions, don't undo without a reason:
 - Left to the app: php-fpm reload (needs a sudoers rule; `install.sh`
   prints a suggestion), expand-only migrations, fork-mode pm2 gaps.
 
+## Dedicated deploy user (2026-10-22)
+
+Until now each server's "deploy user" was the admin login (`NOPASSWD:ALL`,
+owner of pm2, bare repos, worktrees, webhook listener). The user asked for a
+dedicated unprivileged `deploy` user with sudoers only for what deploys need.
+Design and the per-server migration runbook: `docs/deploy-user.md`.
+Implemented in the toolkit and tested; **no server is migrated yet**
+(the first VPS goes first, by the user's choice — check `servers.local.yml`).
+
+Non-obvious decisions, don't undo without a reason:
+- **Root commands go through helpers, not sudoers lines.** `chmod -R`,
+  `chgrp -R`, `find -exec`, `systemctl restart *` are each root-equivalent
+  under a sudoers `*` (which matches spaces). `share/git-deploy-fixperms`
+  (fixed chgrp/ug+rw/setgid under an allowed root, fd-based, O_NOFOLLOW,
+  never follows symlinks) and `share/git-deploy-service` (unit/action
+  allow-list in root-owned `/etc/git-deploy/services`) replace them; so
+  existing `deploy.conf` files must be ported (`sudo chmod/chgrp/find/
+  systemctl` lines) *before* the old NOPASSWD:ALL is removed.
+- **`(www-data) NOPASSWD: ALL` is deliberate.** artisan/composer/pnpm/nice/
+  find can all run anything, so a command list would be theatre. The boundary
+  is root, not www-data.
+- **Rejection of other users is a `pre-receive` hook** (`share/pre-receive`,
+  reads `/etc/git-deploy/user`), not just file permissions, so a leftover
+  remote gets a message naming the right URL. No file = no-op. `install.sh`
+  links it into every bare repo on our hook; `git-deploy-new` does for new
+  ones. The webhook path doesn't push, so it's unaffected.
+- `install.sh --deploy-user NAME` writes `/etc/git-deploy/user` and
+  `/etc/sudoers.d/git-deploy` (validated with `visudo -cf`; refuses to
+  overwrite on failure); a plain re-run / `git-deploy-update` reuses the
+  recorded name. Without the flag sudo is untouched (old behavior).
+- Every local clone's `deploy` remote must be switched to
+  `ssh://deploy@<host>/srv/git/<app>.git` (clone paths are in
+  `servers.local.yml`); a missed one fails on `pre-receive`.
+- Tests run with `GIT_DEPLOY_ETC` pointing at a temp dir; mutation-checked
+  (pre-receive disabled, O_NOFOLLOW removed, allow-list ignored all fail).
+
 ## Optional: per-repo logrotate definitions (2026-09-29)
 
 An app may commit `deploy.logrotate` (template in

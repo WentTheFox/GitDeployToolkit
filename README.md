@@ -438,15 +438,28 @@ touches what is being served (the half-built release is deleted), and
   expand-only migrations; fork-mode pm2 restarts still have a gap
   (`pm2 reload` only helps cluster/`wait_ready` apps).
 
-## sudo for restarts
+## sudo, and a dedicated deploy user
 
-`deploy_restart` often needs to restart a systemd unit as root. Scope
-this narrowly rather than giving the deploy user full sudo — e.g. in
-`/etc/sudoers.d/git-deploy-myapp`:
+Don't deploy as your admin login. Create an unprivileged `deploy` user and run
+`sudo ./install.sh --deploy-user deploy`: that writes
+`/etc/sudoers.d/git-deploy`, which lets it run only the toolkit's root
+helpers, and installs a `pre-receive` hook that rejects pushes from any other
+user. In `deploy.conf`, use the helpers instead of raw root commands:
 
+```sh
+sudo -n /usr/local/lib/git-deploy/git-deploy-service restart myapp-horizon.service
+sudo -n /usr/local/lib/git-deploy/git-deploy-service reload php8.5-fpm.service
+sudo -n /usr/local/lib/git-deploy/git-deploy-fixperms "$WORKTREE" storage bootstrap/cache
+sudo -n -u www-data php artisan migrate --force
 ```
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart php-fpm-myapp
-```
+
+List the units a deploy may touch in `/etc/git-deploy/services`
+(`reload php*-fpm.service`). Full design, what the rules allow and the
+migration runbook for an existing server: `docs/deploy-user.md`.
+
+Without `--deploy-user` nothing about sudo is touched and you scope it
+yourself, e.g. `/etc/sudoers.d/git-deploy-myapp`:
+`deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart php-fpm-myapp`.
 
 ## Persistent per-server files (.env, uploads, etc.)
 

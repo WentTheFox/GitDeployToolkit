@@ -84,6 +84,8 @@ PUBLIC_LOG="" BARE="" WORKTREE=""
 # page shows one. Bash's printf %()T, not `date`: no fork per line.
 public() {
   local line="$1"
+  # RELEASES_DIR (release directories) defaults to "$WORKTREE.d", which the line below masks by prefix; a custom one is masked here.
+  [[ -z "${RELEASES_DIR:-}" ]] || line="${line//"$RELEASES_DIR"/<releases>}"
   [[ -z "$WORKTREE" ]] || line="${line//"$WORKTREE"/<worktree>}"
   [[ -z "$BARE" ]] || line="${line//"$BARE"/<repo>}"
   [[ -z "$REPO_ROOT" ]] || line="${line//"$REPO_ROOT"/<repos>}"

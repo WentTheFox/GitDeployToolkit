@@ -391,6 +391,50 @@ warns until `sudo git-deploy-cron remove <app>`. `git-deploy-cron report
 <app> <worktree> < deploy.cron` prints the schedule without installing.
 Design notes: `docs/cron.md`.
 
+## Release directories (optional, for zero-downtime deploys)
+
+By default a deploy checks out in place. An app can opt in to **release
+directories** instead (`RELEASES=1` in its `deploy.env`; design and reasoning
+in `docs/releases.md`): each deploy builds a fresh checkout in
+`<worktree>.d/releases/<id>` while the old one keeps serving, and only
+then moves the `<worktree>` symlink over, atomically. A failed build never
+touches what is being served (the half-built release is deleted), and
+`git-deploy-rollback` goes back.
+
+```
+/var/www/myapp            -> symlink to the live release (what nginx/pm2 use)
+/var/www/myapp.d/releases/<id>/   one checkout per deploy, newest KEEP_RELEASES (default 5) kept
+/var/www/myapp.d/shared/          what survives releases: .env, storage/, ...
+```
+
+- **`SHARED=(.env storage)`** in the app's `deploy.conf` lists the paths
+  that must outlive a release. Before `deploy_build` each is replaced in the
+  new release by a link into `shared/`; a missing one fails the deploy before
+  anything is swapped.
+- **`deploy_build`** runs with its working directory in the new release
+  (`$RELEASE`) while `$WORKTREE` still points at the old one. `deploy_restart`
+  runs after the swap. `$RELEASE` also exists in-place (equal to
+  `$WORKTREE`), so one `deploy.conf` works either way.
+- **Converting an app that is deployed in place:** `git-deploy-releases-init
+  <app> .env storage` once, by hand, at a quiet moment. A directory can't be
+  replaced by a symlink atomically, so that one step has a moment of
+  downtime; every deploy after it is atomic. It sets `RELEASES=1` for you.
+  A brand-new app just adds `RELEASES=1` to `deploy.env` and creates
+  `<worktree>.d/shared/...` before its first push.
+- **Rollback:** `git-deploy-rollback <app> [release-id]` re-points the
+  symlink (default: the release before the live one) and runs
+  `deploy_rollback()` from that release's `deploy.conf`. It never runs
+  `deploy_restart()`, because that usually migrates; with no
+  `deploy_rollback()` defined it swaps the symlink and says so. It does
+  not undo database migrations.
+- **Logs and cron** keep working: `deploy.logrotate` / `deploy.cron` name the
+  symlink, and logs may live under `shared/` (e.g. `storage/logs`) or in the
+  release.
+- **Still the app's job:** a php-fpm reload (or `opcache.revalidate_path=1`)
+  after the swap, which needs a sudoers rule for that one command;
+  expand-only migrations; fork-mode pm2 restarts still have a gap
+  (`pm2 reload` only helps cluster/`wait_ready` apps).
+
 ## sudo for restarts
 
 `deploy_restart` often needs to restart a systemd unit as root. Scope
@@ -435,12 +479,11 @@ python3-yaml`), or point `WEBHOOK_BIN=`/`PYTHON=` at your own copies.
 
 ## Notes / deliberate simplifications
 
-- Deploys check the branch out **in-place** (no releases/current
-  symlink, no rollback machinery) — matches how these apps are deployed
-  today. There's a brief window where the worktree has new code but the
-  service hasn't restarted yet; for near-zero-downtime or instant
-  rollback, this would need atomic release directories, which is a
-  bigger change and can be added later if it becomes worth it.
+- Deploys check the branch out **in-place** by default (the simple
+  path). There's a brief window where the worktree has new code but the
+  service hasn't restarted yet. Apps that need zero downtime or rollback
+  opt in to release directories (see above); nothing changes for those
+  that don't.
 - Only pushes to the configured `BRANCH` trigger a deploy; anything else
   is accepted (so you can still push tags/other branches for backup) but
   ignored.

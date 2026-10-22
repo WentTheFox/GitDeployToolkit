@@ -8,6 +8,8 @@
 #   $GIT_DIR/deploy.env   (server-side, created by git-deploy-new)
 #     WORKTREE=/var/www/myapp
 #     BRANCH=main                # optional, defaults to main
+#     RELEASES=1                 # optional: release directories + atomic
+#                                # symlink swap, see docs/releases.md
 #   $WORKTREE/deploy.conf        (in the app's own repo, versioned there)
 #     deploy_build()   { ... }   # optional
 #     deploy_restart() { ... }   # optional
@@ -57,6 +59,47 @@ notify() { # notify <started|success|failed> [duration-s]
 NOTIFY_PENDING=""
 trap '[[ -z "$NOTIFY_PENDING" ]] || notify failed "$(( $(date +%s) - DEPLOY_START_EPOCH ))"' EXIT
 
+# --- release directories (RELEASES=1) -------------------------------------
+
+link_shared() { # link_shared <path relative to the release>
+  local p="$1"
+  if [[ "$p" == /* || "/$p/" == *"/../"* || -z "$p" ]]; then
+    echo "git-deploy: SHARED entry '$p' must be a relative path without .." >&2
+    return 1
+  fi
+  if [[ ! -e "$SHARED_DIR/$p" && ! -L "$SHARED_DIR/$p" ]]; then
+    echo "git-deploy: shared/$p is missing — create it or run git-deploy-releases-init" >&2
+    return 1
+  fi
+  rm -rf "${RELEASE:?}/$p"
+  mkdir -p "$(dirname "$RELEASE/$p")"
+  ln -s "$SHARED_DIR/$p" "$RELEASE/$p"
+}
+
+# Point $WORKTREE at the new release. rename(2) of a fresh symlink over the
+# old one is atomic: a request sees the old release or the new, never a mix.
+swap_release() {
+  local tmp="$WORKTREE.new.$$"
+  ln -s "$RELEASE" "$tmp"
+  mv -T "$tmp" "$WORKTREE"
+  echo "git-deploy: $WORKTREE now serves release $RELEASE_ID (was ${PREV_RELEASE:-nothing})"
+}
+
+# Keep the newest KEEP_RELEASES (at least 2), and never the live release or
+# the one before it, which is what git-deploy-rollback goes back to. Failing
+# to delete one is not a failed deploy.
+prune_releases() {
+  local live n=0 r
+  live=$(basename "$(readlink "$WORKTREE")")
+  while read -r r; do
+    n=$((n + 1))
+    (( n > ${KEEP_RELEASES} && n > 2 )) || continue
+    [[ "$r" != "$live" && "$r" != "$PREV_RELEASE" ]] || continue
+    rm -rf "${RELEASES_DIR:?}/releases/$r" && echo "git-deploy: pruned release $r" \
+      || echo "git-deploy: could not prune release $r — continuing" >&2
+  done < <(ls -1 "$RELEASES_DIR/releases" | sort -r)
+}
+
 while read -r oldrev newrev ref; do
   if [[ "$ref" != "refs/heads/$BRANCH" ]]; then
     echo "git-deploy: ignoring push to $ref (this app deploys $BRANCH only)" >&2
@@ -84,19 +127,57 @@ while read -r oldrev newrev ref; do
   notify started
   NOTIFY_PENDING=1
 
-  mkdir -p "$WORKTREE"
-  echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
-  git --work-tree="$WORKTREE" --git-dir="$GIT_DIR" checkout -f "$BRANCH"
+  # CODE is where this deploy's files are checked out and where deploy.conf
+  # is read from; RELEASE is what deploy_build builds. In-place they are both
+  # $WORKTREE. With RELEASES=1 (docs/releases.md) $WORKTREE is a symlink to
+  # the live release, a deploy builds a fresh one next to it, and the symlink
+  # only moves once deploy_build succeeded, so a failed build never touches
+  # what is being served.
+  RELEASE_JSON=""
+  if [[ -n "${RELEASES:-}" ]]; then
+    RELEASES_DIR="${RELEASES_DIR:-$WORKTREE.d}"
+    KEEP_RELEASES="${KEEP_RELEASES:-5}"
+    SHARED_DIR="$RELEASES_DIR/shared"
+    RELEASE_ID="$(date -u +%Y%m%d%H%M%S.%3N)-${newrev:0:12}"
+    RELEASE="$RELEASES_DIR/releases/$RELEASE_ID"
+    PREV_RELEASE=""
+    if [[ -L "$WORKTREE" ]]; then
+      PREV_RELEASE=$(basename "$(readlink "$WORKTREE")")
+    elif [[ -e "$WORKTREE" ]]; then
+      # A brand-new app has the empty directory git-deploy-new made; an app
+      # with real content needs git-deploy-releases-init (it can't be swapped
+      # for a symlink atomically, so it is a deliberate one-time step).
+      rmdir "$WORKTREE" 2> /dev/null || {
+        echo "git-deploy: RELEASES=1 but $WORKTREE is a real directory with content — run git-deploy-releases-init $(basename "$GIT_DIR" .git) once (docs/releases.md)" >&2
+        exit 1
+      }
+    fi
+    CODE="$RELEASE"
+    RELEASE_JSON=",\"release\":\"$RELEASE_ID\""
+    mkdir -p "$RELEASES_DIR/releases" "$SHARED_DIR"
+    mkdir "$RELEASE"
+    echo "git-deploy: checking out $BRANCH ($newrev) into release $RELEASE_ID"
+    # A throwaway index, so the bare repo's own HEAD and index stay put.
+    GIT_INDEX_FILE="$RELEASES_DIR/.index.$$" git --git-dir="$GIT_DIR" --work-tree="$RELEASE" read-tree "$newrev"
+    GIT_INDEX_FILE="$RELEASES_DIR/.index.$$" git --git-dir="$GIT_DIR" --work-tree="$RELEASE" checkout-index -a -f
+    rm -f "$RELEASES_DIR/.index.$$"
+  else
+    CODE="$WORKTREE"
+    RELEASE="$WORKTREE"
+    mkdir -p "$WORKTREE"
+    echo "git-deploy: checking out $BRANCH ($newrev) into $WORKTREE"
+    git --work-tree="$WORKTREE" --git-dir="$GIT_DIR" checkout -f "$BRANCH"
+  fi
 
   # The worktree has no .git of its own, so anything in the app that asks
   # git "what's deployed?" has no answer. Leave one: sha on line 1, committer
   # date (ISO 8601) on line 2. Untracked, so checkout -f never touches it.
   # A .git *directory* here is a pre-toolkit relic that answers with a stale
   # commit instead — see README "Leftover .git in the worktree".
-  git --git-dir="$GIT_DIR" log -1 --format='%H%n%cI' "$newrev" > "$WORKTREE/.git-deploy-commit" \
-    || echo "git-deploy: could not write $WORKTREE/.git-deploy-commit" >&2
-  if [[ -d "$WORKTREE/.git" ]]; then
-    echo "git-deploy: warning: $WORKTREE/.git is a real repository left from before the toolkit; it reports a stale commit. Back it up and remove it (README: Leftover .git in the worktree)" >&2
+  git --git-dir="$GIT_DIR" log -1 --format='%H%n%cI' "$newrev" > "$CODE/.git-deploy-commit" \
+    || echo "git-deploy: could not write $CODE/.git-deploy-commit" >&2
+  if [[ -d "$CODE/.git" ]]; then
+    echo "git-deploy: warning: $CODE/.git is a real repository left from before the toolkit; it reports a stale commit. Back it up and remove it (README: Leftover .git in the worktree)" >&2
   fi
 
   # Opt-in log retention policy: an app that commits deploy.logrotate gets it
@@ -111,18 +192,18 @@ while read -r oldrev newrev ref; do
   LOGROTATE_RETENTION="[]"
   LOGROTATE_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-logrotate"
   LOGROTATE_APP=$(basename "$GIT_DIR" .git)
-  if [[ -f "$WORKTREE/deploy.logrotate" && ! -L "$WORKTREE/deploy.logrotate" ]]; then
+  if [[ -f "$CODE/deploy.logrotate" && ! -L "$CODE/deploy.logrotate" ]]; then
     if [[ ! -x "$LOGROTATE_HELPER" ]]; then
       LOGROTATE_STATUS="unavailable"
       echo "git-deploy: logrotate: helper not installed, retention not checked — continuing" >&2
-    elif ! LOGROTATE_RETENTION=$("$LOGROTATE_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.logrotate"); then
+    elif ! LOGROTATE_RETENTION=$("$LOGROTATE_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$CODE/deploy.logrotate"); then
       LOGROTATE_STATUS="refused"
       LOGROTATE_RETENTION="[]"
       echo "git-deploy: logrotate: deploy.logrotate not installed (refused) — continuing" >&2
     else
       # GIT_DEPLOY_LOGROTATE_SUDO="" lets the tests (and a root deploy user) skip sudo.
       # shellcheck disable=SC2086
-      if LOGROTATE_STATUS=$(${GIT_DEPLOY_LOGROTATE_SUDO-sudo -n} "$LOGROTATE_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.logrotate"); then
+      if LOGROTATE_STATUS=$(${GIT_DEPLOY_LOGROTATE_SUDO-sudo -n} "$LOGROTATE_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$CODE/deploy.logrotate"); then
         echo "git-deploy: logrotate: policy $LOGROTATE_STATUS"
       else
         [[ "$LOGROTATE_STATUS" == refused ]] || LOGROTATE_STATUS="unavailable"
@@ -144,18 +225,18 @@ while read -r oldrev newrev ref; do
   CRON_JOBS="[]"
   CRON_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/git-deploy-cron"
   CRON_INSTALLED="${CRON_D:-/etc/cron.d}/git-deploy-$LOGROTATE_APP"
-  if [[ -f "$WORKTREE/deploy.cron" && ! -L "$WORKTREE/deploy.cron" ]]; then
+  if [[ -f "$CODE/deploy.cron" && ! -L "$CODE/deploy.cron" ]]; then
     if [[ ! -x "$CRON_HELPER" ]]; then
       CRON_STATUS="unavailable"
       echo "git-deploy: cron: helper not installed, deploy.cron not checked — continuing" >&2
-    elif ! CRON_JOBS=$("$CRON_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.cron"); then
+    elif ! CRON_JOBS=$("$CRON_HELPER" report "$LOGROTATE_APP" "$WORKTREE" < "$CODE/deploy.cron"); then
       CRON_STATUS="refused"
       CRON_JOBS="[]"
       echo "git-deploy: cron: deploy.cron not installed (refused) — continuing" >&2
     else
       # GIT_DEPLOY_CRON_SUDO="" lets the tests (and a root deploy user) skip sudo.
       # shellcheck disable=SC2086
-      if CRON_STATUS=$(${GIT_DEPLOY_CRON_SUDO-sudo -n} "$CRON_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$WORKTREE/deploy.cron"); then
+      if CRON_STATUS=$(${GIT_DEPLOY_CRON_SUDO-sudo -n} "$CRON_HELPER" install "$LOGROTATE_APP" "$WORKTREE" < "$CODE/deploy.cron"); then
         echo "git-deploy: cron: schedule $CRON_STATUS"
       else
         [[ "$CRON_STATUS" == refused ]] || CRON_STATUS="unavailable"
@@ -170,8 +251,8 @@ while read -r oldrev newrev ref; do
   fi
 
   DEPLOY_STATUS="success"
-  APP_CONF="$WORKTREE/deploy.conf"
-  if [[ -f "$APP_CONF" ]]; then
+  APP_CONF="$CODE/deploy.conf"
+  if [[ -f "$APP_CONF" || -n "${RELEASES:-}" ]]; then
     # Run in a subshell so deploy_build/deploy_restart from a previous
     # iteration (unlikely, but defensive) can't leak, and so `cd` here
     # never affects the rest of the hook. Errors are captured (rather than
@@ -180,7 +261,7 @@ while read -r oldrev newrev ref; do
     set +e
     (
       set -e
-      cd "$WORKTREE"
+      cd "$CODE"
       # Name the command that failed before set -e aborts, so a failed
       # deploy says more than "hook exited 1". $BASH_COMMAND is the
       # unexpanded source text (same as what's committed in deploy.conf),
@@ -192,21 +273,48 @@ while read -r oldrev newrev ref; do
       set -E
       _git_deploy_level=$BASH_SUBSHELL
       trap '_git_deploy_rc=$?; if [[ $BASH_SUBSHELL == "$_git_deploy_level" ]]; then echo "git-deploy: failed (exit $_git_deploy_rc) in ${FUNCNAME[0]:-deploy.conf}: $BASH_COMMAND" >&2; fi' ERR
-      # shellcheck source=/dev/null
-      source "$APP_CONF"
+      if [[ -f "$APP_CONF" ]]; then
+        # shellcheck source=/dev/null
+        source "$APP_CONF"
+      else
+        echo "git-deploy: no deploy.conf in repo root, skipping build/restart"
+      fi
+
+      if [[ -n "${RELEASES:-}" ]]; then
+        # deploy.conf's SHARED=(.env storage ...): paths that outlive a
+        # release. Each is replaced in the new release by a link into
+        # $SHARED_DIR (created by git-deploy-releases-init, or by hand).
+        for _shared in ${SHARED[@]+"${SHARED[@]}"}; do
+          link_shared "$_shared"
+        done
+      fi
 
       if declare -f deploy_build > /dev/null; then
         echo "git-deploy: running deploy_build"
         deploy_build
       fi
 
+      if [[ -n "${RELEASES:-}" ]]; then
+        swap_release
+      fi
+
       if declare -f deploy_restart > /dev/null; then
         echo "git-deploy: running deploy_restart"
         deploy_restart
       fi
+
+      if [[ -n "${RELEASES:-}" ]]; then
+        prune_releases
+      fi
     )
     if [[ $? -ne 0 ]]; then
       DEPLOY_STATUS="failed"
+      # Died before the swap: the new release was never served, so it is of
+      # no use to anyone. (After the swap it is live and stays.)
+      if [[ -n "${RELEASES:-}" && "$(readlink "$WORKTREE" 2> /dev/null || true)" != "$RELEASE" ]]; then
+        rm -rf "$RELEASE" || true
+        echo "git-deploy: new release discarded, $WORKTREE still serves ${PREV_RELEASE:-nothing}" >&2
+      fi
     fi
     set -e
   else
@@ -214,7 +322,7 @@ while read -r oldrev newrev ref; do
   fi
 
   DEPLOY_DURATION=$(( $(date +%s) - DEPLOY_START_EPOCH ))
-  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\",\"retention\":$LOGROTATE_RETENTION,\"cron\":\"$CRON_STATUS\",\"cron_jobs\":$CRON_JOBS"
+  log_deploy_event "complete" ",\"status\":\"$DEPLOY_STATUS\",\"duration_s\":$DEPLOY_DURATION,\"logrotate\":\"$LOGROTATE_STATUS\",\"retention\":$LOGROTATE_RETENTION,\"cron\":\"$CRON_STATUS\",\"cron_jobs\":$CRON_JOBS$RELEASE_JSON"
   NOTIFY_PENDING=""
   notify "$DEPLOY_STATUS" "$DEPLOY_DURATION"
 

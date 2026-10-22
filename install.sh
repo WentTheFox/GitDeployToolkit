@@ -25,6 +25,9 @@ install -m 0755 "$SRC_DIR/share/git-deploy-logrotate" "$LIB_DIR/git-deploy-logro
 install -m 0755 "$SRC_DIR/share/git-deploy-cron" "$LIB_DIR/git-deploy-cron"
 install -m 0755 "$SRC_DIR/bin/git-deploy-new" "$BIN_DIR/git-deploy-new"
 install -m 0755 "$SRC_DIR/bin/git-deploy-update" "$BIN_DIR/git-deploy-update"
+# Optional release directories (RELEASES=1): rollback, and the one-time conversion.
+install -m 0755 "$SRC_DIR/bin/git-deploy-rollback" "$BIN_DIR/git-deploy-rollback"
+install -m 0755 "$SRC_DIR/bin/git-deploy-releases-init" "$BIN_DIR/git-deploy-releases-init"
 # Where git-deploy-update finds the clone to pull.
 printf '%s\n' "$SRC_DIR" > "$LIB_DIR/source"
 
@@ -44,6 +47,9 @@ echo "git-deploy-toolkit installed:"
 echo "  hook:   $LIB_DIR/post-receive"
 echo "  helper: $BIN_DIR/git-deploy-new"
 echo "  update: $BIN_DIR/git-deploy-update (pulls $SRC_DIR and re-runs this script)"
+echo "  releases (optional): git-deploy-rollback, git-deploy-releases-init — see README \"Release directories\"."
+echo "    An app's deploy_restart usually needs a php-fpm reload after the swap, e.g."
+echo "    <deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl reload php*-fpm  (scope it to your unit)"
 echo "  webhook (optional): $LIB_DIR/git-deploy-webhook, git-deploy-webhook@.service"
 echo "  logrotate (optional): $LIB_DIR/git-deploy-logrotate — for apps with a deploy.logrotate, allow it with"
 echo "    <deploy-user> ALL=(root) NOPASSWD: $LIB_DIR/git-deploy-logrotate install *"

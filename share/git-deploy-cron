@@ -102,6 +102,11 @@ def check_worktree(worktree):
     real = os.path.realpath(worktree)
     if not any(real.startswith(r.rstrip("/") + "/") for r in allowed_roots()):
         raise Refused("worktree is not inside an allowed root (%s)" % ", ".join(allowed_roots()))
+    # Release directories (RELEASES=1, docs/releases.md): the worktree is a
+    # symlink to <base>/releases/<id>. Jobs and the "scheduled elsewhere"
+    # check must name the symlink, since the real path changes every deploy.
+    if os.path.islink(worktree) and os.path.basename(os.path.dirname(real)) == "releases":
+        return worktree
     return real
 
 

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# One-time conversion of an app's worktree to release directories
+# (RELEASES=1, see docs/releases.md). Run by hand, as the deploy user.
+#
+# Usage: git-deploy-releases-init [--yes] <app> <shared-path>...
+#   <shared-path>: what must survive from release to release, relative to the
+#   worktree, e.g. `.env storage`. It must match SHARED=() in the app's
+#   deploy.conf. Each is moved to <base>/shared and linked back.
+#
+# The worktree becomes <base>/releases/<id> and $WORKTREE a symlink to it.
+# A directory can't be atomically replaced by a symlink, so the worktree and
+# each shared *directory* has a gap of a moment (two renames apart) during
+# which the site can 404/500. Files (.env) are swapped atomically. Pick a
+# quiet moment; every deploy after this one is atomic.
+
+set -euo pipefail
+
+REPO_ROOT="${GIT_DEPLOY_REPO_ROOT:-/srv/git}"
+ASSUME_YES=""
+[[ "${1:-}" != "--yes" ]] || { ASSUME_YES=1; shift; }
+APP="${1:?Usage: git-deploy-releases-init [--yes] <app> <shared-path>...}"
+shift
+[[ $# -gt 0 ]] || { echo "git-deploy-releases-init: name at least one shared path (e.g. .env storage)" >&2; exit 1; }
+GIT_DIR="$REPO_ROOT/$APP.git"
+
+[[ -f "$GIT_DIR/deploy.env" ]] || { echo "git-deploy-releases-init: no such app: $APP" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$GIT_DIR/deploy.env"
+: "${WORKTREE:?WORKTREE not set}"
+[[ -z "${RELEASES:-}" ]] || { echo "git-deploy-releases-init: $APP already has RELEASES=1" >&2; exit 1; }
+[[ -d "$WORKTREE" && ! -L "$WORKTREE" ]] || { echo "git-deploy-releases-init: $WORKTREE is not a real directory" >&2; exit 1; }
+RELEASES_DIR="${RELEASES_DIR:-$WORKTREE.d}"
+[[ ! -e "$RELEASES_DIR" ]] || { echo "git-deploy-releases-init: $RELEASES_DIR already exists" >&2; exit 1; }
+for p in "$@"; do
+  [[ "$p" != /* && "/$p/" != *"/../"* ]] || { echo "git-deploy-releases-init: bad path $p" >&2; exit 1; }
+  [[ -e "$WORKTREE/$p" ]] || { echo "git-deploy-releases-init: $WORKTREE/$p does not exist" >&2; exit 1; }
+  [[ ! -L "$WORKTREE/$p" ]] || { echo "git-deploy-releases-init: $WORKTREE/$p is already a symlink" >&2; exit 1; }
+done
+
+SHA=$(sed -n 1p "$WORKTREE/.git-deploy-commit" 2> /dev/null || true)
+RELEASE_ID="$(date -u +%Y%m%d%H%M%S.%3N)-${SHA:0:12}"
+RELEASE_ID="${RELEASE_ID%-}"
+echo "git-deploy-releases-init: $WORKTREE -> $RELEASES_DIR/releases/$RELEASE_ID"
+echo "  shared (moved to $RELEASES_DIR/shared): $*"
+if [[ -z "$ASSUME_YES" ]]; then
+  read -r -p "Proceed? There is a moment of downtime. [y/N] " reply
+  [[ "$reply" == [yY]* ]] || { echo "aborted"; exit 1; }
+fi
+
+mkdir -p "$RELEASES_DIR/releases" "$RELEASES_DIR/shared"
+# Shared state first, as copies (no gap): a file is then swapped atomically,
+# a directory by two renames.
+for p in "$@"; do
+  mkdir -p "$(dirname "$RELEASES_DIR/shared/$p")"
+  cp -a "$WORKTREE/$p" "$RELEASES_DIR/shared/$p"
+done
+mv "$WORKTREE" "$RELEASES_DIR/releases/$RELEASE_ID"
+ln -s "$RELEASES_DIR/releases/$RELEASE_ID" "$WORKTREE"
+for p in "$@"; do
+  r="$RELEASES_DIR/releases/$RELEASE_ID/$p"
+  if [[ -d "$r" ]]; then
+    # Anything written since the copy would be lost: this is the gap. Sync, swap.
+    rsync -a "$r/" "$RELEASES_DIR/shared/$p/" 2> /dev/null || cp -a "$r/." "$RELEASES_DIR/shared/$p/"
+    rm -rf "$r"
+    ln -s "$RELEASES_DIR/shared/$p" "$r"
+  else
+    ln -s "$RELEASES_DIR/shared/$p" "$r.new.$$"
+    mv -T "$r.new.$$" "$r"
+  fi
+done
+printf 'RELEASES=1\n' >> "$GIT_DIR/deploy.env"
+echo "git-deploy-releases-init: done. Add SHARED=($*) to the app's deploy.conf before the next deploy."

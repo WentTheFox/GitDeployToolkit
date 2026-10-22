@@ -50,7 +50,7 @@ wait_until() { # wait_until <seconds> <command...>
 }
 
 section "syntax"
-for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update install.sh tests/run.sh; do
+for f in share/post-receive share/git-deploy-webhook share/git-deploy-notify bin/git-deploy-new bin/git-deploy-update bin/git-deploy-rollback bin/git-deploy-releases-init install.sh tests/run.sh; do
   check "bash -n $f" bash -n "$ROOT/$f"
 done
 check "python3 -m py_compile share/git-deploy-logrotate" "$PYTHON" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/git-deploy-logrotate"
@@ -696,6 +696,177 @@ check "unticked ones are skipped" test "$(plan "production beta" '{"production":
 check "real booleans work too" test "$(plan "production beta" '{"production":true,"beta":false}')" = '["production"]'
 check "nothing ticked -> fails" bash -c "! ENVIRONMENTS=production INPUTS='{\"production\":\"false\"}' GITHUB_OUTPUT=/dev/null bash '$T/plan.sh' > /dev/null 2>&1"
 check "listed without a checkbox -> fails" bash -c "! ENVIRONMENTS='production beta' INPUTS='{\"production\":\"true\"}' GITHUB_OUTPUT=/dev/null bash '$T/plan.sh' > /dev/null 2>&1"
+
+# --- release directories --------------------------------------------------
+
+section "release directories (RELEASES=1)"
+git init -q -b main reldev
+(
+  cd reldev
+  cat > deploy.conf <<'EOF2'
+SHARED=(.env storage)
+deploy_build() {
+  if [ -f FAILBUILD ]; then echo "build broke" >&2; false; fi
+  readlink "$WORKTREE" > built-saw-live || echo none > built-saw-live
+  cat .env > built-saw-env
+  echo built > built.txt
+}
+deploy_restart() {
+  if [ -f FAILRESTART ]; then return 1; fi
+  echo "restarted live=$(basename "$(readlink "$WORKTREE")")"
+}
+deploy_rollback() { echo "rolled back to $(basename "$RELEASE")" > "$GIT_DIR/rollback.out"; }
+EOF2
+  mkdir storage && echo tracked > storage/tracked.txt
+  git add -A && git commit -q -m "releases app"
+)
+rcommit() { # rcommit <message> [add|rm FILE]
+  (
+    cd "$T/reldev"
+    case "${2:-}" in
+      add) touch "$3" && git add "$3" ;;
+      rm) git rm -q "$3" ;;
+    esac
+    git commit -q --allow-empty -m "$1"
+    git rev-parse HEAD
+  )
+}
+GIT_DEPLOY_LIB="$ROOT/share" GIT_DEPLOY_REPO_ROOT="$T/srv" "$ROOT/bin/git-deploy-new" rel "$T/www/rel" > /dev/null
+RBARE="$T/srv/rel.git" RWT="$T/www/rel" RBASE="$T/www/rel.d"
+printf 'RELEASES=1\nKEEP_RELEASES=3\n' >> "$RBARE/deploy.env"
+mkdir -p "$RBASE/shared/storage" && echo SECRET > "$RBASE/shared/.env"
+rpush() { (cd "$T/reldev" && git push -f "$RBARE" main 2>&1); }
+rlive() { basename "$(readlink "$RWT")"; }
+nrel() { ls -1 "$RBASE/releases" | wc -l; }
+
+R1=$(rcommit "first")
+out=$(rpush)
+check "worktree is a symlink to a release" test -L "$RWT"
+check "release id carries the commit" bash -c "[[ \"\$(basename \"\$(readlink '$RWT')\")\" == *-${R1:0:12} ]]"
+check "the release is a real checkout" test -f "$RWT/deploy.conf"
+check "shared .env is linked into the release" bash -c "[ \"\$(cat '$RWT/.env')\" = SECRET ] && [ -L '$RWT/.env' ]"
+check "a tracked path listed in SHARED is replaced by the shared one" bash -c "[ -L '$RWT/storage' ] && [ ! -e '$RWT/storage/tracked.txt' ]"
+check "deploy_build saw the shared .env" bash -c "[ \"\$(cat '$RWT/built-saw-env')\" = SECRET ]"
+check "first deploy built with nothing live" bash -c "[ \"\$(cat '$RWT/built-saw-live')\" = none ]"
+check "deploy_restart ran after the swap" grep -q "remote: restarted live=$(rlive)" <<< "$out"
+check "deploy_restart sees the new release live" grep -q "restarted live=.*-${R1:0:12}" <<< "$out"
+check "records the commit for the app" bash -c "[ \"\$(sed -n 1p '$RWT/.git-deploy-commit')\" = '$R1' ]"
+check "deploy.jsonl records success and the release" bash -c "tail -1 '$RBARE/deploy.jsonl' | grep -q '\"status\":\"success\".*\"release\":\"$(rlive)\"'"
+REL1=$(rlive)
+
+R2=$(rcommit "second")
+out=$(rpush)
+check "second deploy swapped to a new release" test "$(rlive)" != "$REL1"
+check "deploy_build ran while the old release was still live" bash -c "[ \"\$(cat '$RWT/built-saw-live')\" = '$RBASE/releases/$REL1' ]"
+check "the old release is kept for rollback" test -d "$RBASE/releases/$REL1"
+check "the old release is untouched by the new build" test ! -e "$RBASE/releases/$REL1/built.txt" -o "$(cat "$RBASE/releases/$REL1/built-saw-live")" = none
+
+REL2=$(rlive)
+rcommit "break build" add FAILBUILD > /dev/null
+out=$(rpush)
+check "failed build: still serving the previous release" test "$(rlive)" = "$REL2"
+check "failed build is named" grep -q "git-deploy: failed (exit 1) in deploy_build" <<< "$out"
+check "failed build: the new release is discarded" test "$(nrel)" = 2
+check "failed build is recorded as failed" bash -c "tail -1 '$RBARE/deploy.jsonl' | grep -q '\"status\":\"failed\"'"
+check "failed build never reached deploy_restart" bash -c "! grep -q 'remote: restarted' <<< \"\$1\"" _ "$out"
+check "shared state survived the failed build" bash -c "[ \"\$(cat '$RBASE/shared/.env')\" = SECRET ]"
+rcommit "unbreak build" rm FAILBUILD > /dev/null
+
+rcommit "break restart" add FAILRESTART > /dev/null
+out=$(rpush)
+REL3=$(rlive)
+check "failed restart: the new release is live (it was swapped)" test "$REL3" != "$REL2"
+check "failed restart: recorded as failed" bash -c "tail -1 '$RBARE/deploy.jsonl' | grep -q '\"status\":\"failed\"'"
+rcommit "unbreak restart" rm FAILRESTART > /dev/null
+rpush > /dev/null
+rcommit "more 1" > /dev/null; rpush > /dev/null
+rcommit "more 2" > /dev/null; rpush > /dev/null
+check "pruned to KEEP_RELEASES" test "$(nrel)" = 3
+check "pruning never removes the live release" test -d "$RBASE/releases/$(rlive)"
+
+# the release before the live one must have survived the prune: rollback goes there
+PREV=$(ls -1 "$RBASE/releases" | sort | tail -2 | head -1)
+export GIT_DEPLOY_REPO_ROOT="$T/srv"
+out=$("$ROOT/bin/git-deploy-rollback" rel 2>&1)
+check "rollback re-points the symlink at the previous release" test "$(rlive)" = "$PREV"
+check "rollback ran deploy_rollback for that release" bash -c "grep -q 'rolled back to $PREV' '$RBARE/rollback.out'"
+check "rollback did not run deploy_restart" bash -c "! grep -q 'restarted' <<< \"\$1\"" _ "$out"
+check "rollback is recorded" bash -c "tail -1 '$RBARE/deploy.jsonl' | grep -q '\"event\":\"rollback\".*\"status\":\"success\".*\"release\":\"$PREV\"'"
+check "rollback refuses the live release" bash -c "! '$ROOT/bin/git-deploy-rollback' rel '$PREV' > /dev/null 2>&1"
+check "rollback refuses an unknown release" bash -c "! '$ROOT/bin/git-deploy-rollback' rel nope > /dev/null 2>&1"
+check "rollback refuses an app without releases" bash -c "! '$ROOT/bin/git-deploy-rollback' app > /dev/null 2>&1"
+NEWEST=$(ls -1 "$RBASE/releases" | sort | tail -1)
+"$ROOT/bin/git-deploy-rollback" rel "$NEWEST" > /dev/null 2>&1
+check "rollback can go to a named release (forward again)" test "$(rlive)" = "$NEWEST"
+# rolled back to the oldest kept release, then deployed: it is the one before the new live
+# release (what a second rollback returns to) and must outlive the prune that its age would earn
+OLDEST=$(ls -1 "$RBASE/releases" | sort | head -1)
+"$ROOT/bin/git-deploy-rollback" rel "$OLDEST" > /dev/null 2>&1
+rcommit "after rollback" > /dev/null; rpush > /dev/null
+check "the release deployed over survives the prune" test -d "$RBASE/releases/$OLDEST"
+check "pruning still honours KEEP_RELEASES (one extra for the kept previous)" test "$(nrel)" -le 4
+
+# a real directory with content is not silently turned into a symlink
+GIT_DEPLOY_LIB="$ROOT/share" "$ROOT/bin/git-deploy-new" rel2 "$T/www/rel2" > /dev/null
+echo precious > "$T/www/rel2/user-data.txt"
+printf 'RELEASES=1\n' >> "$T/srv/rel2.git/deploy.env"
+out=$(cd reldev && git push "$T/srv/rel2.git" main 2>&1 || true)
+check "a worktree with content needs git-deploy-releases-init" grep -q "git-deploy-releases-init" <<< "$out"
+check "...and is left untouched" bash -c "[ ! -L '$T/www/rel2' ] && [ -f '$T/www/rel2/user-data.txt' ]"
+
+# conversion of an app already deployed in place
+GIT_DEPLOY_LIB="$ROOT/share" "$ROOT/bin/git-deploy-new" rel3 "$T/www/rel3" > /dev/null
+(cd reldev && git push -q "$T/srv/rel3.git" main > /dev/null 2>&1) || true
+echo SECRET3 > "$T/www/rel3/.env"; mkdir -p "$T/www/rel3/storage"; echo user > "$T/www/rel3/storage/upload.txt"
+check "init refuses a missing shared path" bash -c "! '$ROOT/bin/git-deploy-releases-init' --yes rel3 nope > /dev/null 2>&1"
+"$ROOT/bin/git-deploy-releases-init" --yes rel3 .env storage > /dev/null 2>&1
+check "init made the worktree a symlink" test -L "$T/www/rel3"
+check "init kept the checkout" test -f "$T/www/rel3/deploy.conf"
+check "init moved shared state out of the release" bash -c "[ \"\$(cat '$T/www/rel3.d/shared/.env')\" = SECRET3 ] && [ -f '$T/www/rel3.d/shared/storage/upload.txt' ]"
+check "init linked it back" bash -c "[ -L '$T/www/rel3/.env' ] && [ \"\$(cat '$T/www/rel3/storage/upload.txt')\" = user ]"
+check "init switched deploy.env to RELEASES=1" grep -qx RELEASES=1 "$T/srv/rel3.git/deploy.env"
+check "init refuses to run twice" bash -c "! '$ROOT/bin/git-deploy-releases-init' --yes rel3 .env > /dev/null 2>&1"
+rcommit "after init" > /dev/null
+(cd reldev && git push "$T/srv/rel3.git" main > /dev/null 2>&1)
+check "a deploy after init works and keeps shared state" bash -c "[ \"\$(cat '$T/www/rel3/.env')\" = SECRET3 ] && [ \"\$(cat '$T/www/rel3/storage/upload.txt')\" = user ] && [ ! -e '$T/www/rel3.d/releases/'*'/built.txt' -o -f '$T/www/rel3/built.txt' ]"
+check "init's own release is kept for rollback" test "$(ls -1 "$T/www/rel3.d/releases" | wc -l)" = 2
+
+# a missing shared path fails the deploy before anything is swapped
+rm -rf "$RBASE/shared/storage"
+before=$(rlive)
+rcommit "no shared storage" > /dev/null
+out=$(rpush || true)
+check "missing shared path is named" grep -q "shared/storage is missing" <<< "$out"
+check "...and nothing was swapped" test "$(rlive)" = "$before"
+mkdir -p "$RBASE/shared/storage"
+
+# the logrotate and cron helpers must name the symlink, not the release behind it
+if [[ -n "$HAVE_LR" ]]; then
+  LRR="$T/lrwww/lrrel"; LRB="$T/lrwww/lrrel.d"
+  mkdir -p "$LRB/releases/r1/logs" "$LRB/releases/r2/logs" "$LRB/shared/storage/logs"
+  ln -s "$LRB/shared/storage" "$LRB/releases/r1/storage"; ln -s "$LRB/shared/storage" "$LRB/releases/r2/storage"
+  ln -sfn "$LRB/releases/r1" "$LRR"
+  rel_def() { printf '@WORKTREE@/storage/logs/*.log {\n\tsu %s %s\n\tdaily\n\trotate 14\n\tmissingok\n}\n@WORKTREE@/logs/*.log {\n\tsu %s %s\n\tdaily\n\trotate 7\n\tmissingok\n}\n' "$ME" "$MYGRP" "$ME" "$MYGRP"; }
+  check "logrotate: logs in shared/ and in the release are accepted" test "$(rel_def | lr install lrrel "$LRR")" = installed
+  check "logrotate: the policy names the symlink" bash -c "grep -q '^$LRR/storage/logs/\\*.log {' '$LRD/git-deploy-lrrel' && ! grep -q 'releases/r1' '$LRD/git-deploy-lrrel'"
+  ln -sfn "$LRB/releases/r2" "$LRR"
+  check "logrotate: after the next release it is unchanged" test "$(rel_def | lr install lrrel "$LRR")" = unchanged
+  check "logrotate: report paths are relative to the symlink" test "$(rel_def | lr report lrrel "$LRR")" = '[{"path":"storage/logs/*.log","days":14},{"path":"logs/*.log","days":7}]'
+  rm -f "$LRD/git-deploy-lrrel"
+  ln -sfn /etc "$LRB/releases/r2/escape"
+  refuses_rel() { local out; out=$(printf '@WORKTREE@/escape/x.log {\n\tsu %s %s\n\trotate 5\n\tdaily\n}\n' "$ME" "$MYGRP" | lr install lrrel "$LRR" || true); [[ "$out" == refused ]]; }
+  check "logrotate: a symlink out of the release is still refused" refuses_rel
+  ln -sfn "$T/lrwww/lrapp/logs" "$LRB/releases/r2/otherapp"
+  other_def() { printf '@WORKTREE@/otherapp/x.log {\n\tsu %s %s\n\trotate 5\n\tdaily\n}\n' "$ME" "$MYGRP"; }
+  check "logrotate: another app's logs are refused" bash -c "[ \"\$(printf '@WORKTREE@/otherapp/x.log {\n\tsu $ME $MYGRP\n\trotate 5\n\tdaily\n}\n' | '$PYTHON' '$LRH' install lrrel '$LRR' 2>/dev/null)\" = refused ]"
+fi
+CRR="$T/crwww/crrel"; CRB="$T/crwww/crrel.d"
+mkdir -p "$CRB/releases/r1" "$CRB/releases/r2"; ln -sfn "$CRB/releases/r1" "$CRR"
+rm -f "$T/fake-crontabs/root" "$CRD"/git-deploy-*
+check "cron: installs for a release symlink" test "$(printf '0 1 * * * %s php -f @WORKTREE@/a.php\n' "$ME" | cr install crrel "$CRR")" = installed
+check "cron: the job names the symlink, not the release" bash -c "grep -q 'php -f $CRR/a.php' '$CRD/git-deploy-crrel' && ! grep -q releases '$CRD/git-deploy-crrel'"
+ln -sfn "$CRB/releases/r2" "$CRR"
+check "cron: unchanged after the next release" test "$(printf '0 1 * * * %s php -f @WORKTREE@/a.php\n' "$ME" | cr install crrel "$CRR")" = unchanged
 
 echo
 echo "$PASSED passed, $FAILED failed"

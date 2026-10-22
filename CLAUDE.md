@@ -23,10 +23,12 @@ without a reason:
   this logic server-side.
 - **Deploy style**: the user explicitly chose **simple in-place
   checkout** (`git checkout -f` straight into the worktree) over
-  atomic release directories + symlink swap. Rollback and
-  zero-downtime were traded away deliberately for simplicity — if this
-  changes, it's a real architecture change, not a tweak, and should be
-  confirmed with the user first.
+  atomic release directories + symlink swap. **Revisited 2026-10-22:**
+  for a SledgeHammerTime zero-downtime effort the user said they would
+  accept whatever it takes (and mild containerization), so release
+  directories now exist as an **opt-in per app** (`RELEASES=1`, see the
+  section below). In-place stays the default and is what every
+  migrated app uses; don't convert an app without being asked.
 
 ## Removed: self-hosted runner trigger
 
@@ -278,6 +280,39 @@ changes, it's the source of truth for the intended UX.
   deployed clean via its first Deploy-button run.
 - Next steps whenever the user wants to proceed: same recipe as the apps
   above, applied to whatever's next.
+
+## Optional: release directories (2026-10-22)
+
+`RELEASES=1` in a bare repo's `deploy.env` makes `$WORKTREE` a symlink to
+`<WORKTREE>.d/releases/<id>` (`RELEASES_DIR`, `KEEP_RELEASES` override);
+the hook checks the commit into a fresh release, links the app's
+`SHARED=(...)` paths (declared in its `deploy.conf`, stored in
+`<base>/shared`), runs `deploy_build` there while the old release serves,
+swaps the symlink with `mv -T`, then `deploy_restart`, then prunes. Design
+and the reasoning for every choice is `docs/releases.md`; usage is README
+"Release directories". `bin/git-deploy-releases-init` converts a live app
+(a moment of downtime: a directory can't be atomically replaced by a
+symlink); `bin/git-deploy-rollback` re-points the symlink and runs
+`deploy_rollback()`. Tested in `tests/run.sh` (mutation-checked); **no app
+has adopted it yet**.
+
+Non-obvious decisions, don't undo without a reason:
+- **Rollback never runs `deploy_restart()`**: that usually migrates. It
+  runs the separate `deploy_rollback()`, and with none defined it only
+  swaps (fail closed, same lesson as the migrate allowlist).
+- **A failed build deletes the half-built release** and the old one keeps
+  serving; a failed restart leaves the new release live (it was swapped).
+- The logrotate and cron helpers take the *symlink* as the worktree and
+  write it into the policy/jobs (the real path changes every deploy). The
+  logrotate helper derives `<base>/shared` from where the symlink points,
+  never from an argument, so a repo can't widen what it may rotate.
+- Release ids are UTC timestamps to the millisecond + 12 sha chars so that
+  sorting by name is chronological and two deploys in one second don't tie.
+- `$RELEASE` is set in in-place mode too (equal to `$WORKTREE`), so one
+  `deploy.conf` can serve both modes. `cwd` during `deploy_build` is
+  `$RELEASE`.
+- Left to the app: php-fpm reload (needs a sudoers rule; `install.sh`
+  prints a suggestion), expand-only migrations, fork-mode pm2 gaps.
 
 ## Optional: per-repo logrotate definitions (2026-09-29)
 

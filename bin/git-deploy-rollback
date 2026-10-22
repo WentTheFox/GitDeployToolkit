@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Point an app deployed with release directories (RELEASES=1, see
+# docs/releases.md) back at an earlier release, and run its deploy_rollback().
+#
+# Usage: git-deploy-rollback <app> [release-id]
+#   no release-id: the release before the live one. `ls <base>/releases` lists them.
+#
+# deploy_rollback() in the app's deploy.conf is what restarts services for the
+# release being returned to. It is deliberately NOT deploy_restart(): that one
+# usually migrates, and a rollback must never change the schema. With no
+# deploy_rollback() defined the symlink is swapped and nothing else runs.
+
+set -euo pipefail
+
+REPO_ROOT="${GIT_DEPLOY_REPO_ROOT:-/srv/git}"
+APP="${1:?Usage: git-deploy-rollback <app> [release-id]}"
+TARGET_ID="${2:-}"
+GIT_DIR="$REPO_ROOT/$APP.git"
+
+[[ -f "$GIT_DIR/deploy.env" ]] || { echo "git-deploy-rollback: no such app: $APP" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$GIT_DIR/deploy.env"
+: "${WORKTREE:?WORKTREE not set}"
+: "${BRANCH:=main}"
+[[ -n "${RELEASES:-}" ]] || { echo "git-deploy-rollback: $APP does not use release directories (no RELEASES=1)" >&2; exit 1; }
+RELEASES_DIR="${RELEASES_DIR:-$WORKTREE.d}"
+[[ -L "$WORKTREE" ]] || { echo "git-deploy-rollback: $WORKTREE is not a symlink yet" >&2; exit 1; }
+
+# Don't rebuild the symlink under a running deploy (the webhook takes the same lock).
+exec 9> "$GIT_DIR/git-deploy-webhook.lock"
+flock -n 9 || { echo "git-deploy-rollback: a deploy of $APP is running, try again after it" >&2; exit 1; }
+
+LIVE_ID=$(basename "$(readlink "$WORKTREE")")
+if [[ -z "$TARGET_ID" ]]; then
+  # The newest release older than the live one.
+  TARGET_ID=$(ls -1 "$RELEASES_DIR/releases" | sort | awk -v live="$LIVE_ID" '$0 == live { print prev; exit } { prev = $0 }')
+  [[ -n "$TARGET_ID" ]] || { echo "git-deploy-rollback: no release older than $LIVE_ID" >&2; exit 1; }
+fi
+[[ "$TARGET_ID" =~ ^[0-9A-Za-z._-]+$ && -d "$RELEASES_DIR/releases/$TARGET_ID" ]] \
+  || { echo "git-deploy-rollback: no such release: $TARGET_ID" >&2; exit 1; }
+[[ "$TARGET_ID" != "$LIVE_ID" ]] || { echo "git-deploy-rollback: $TARGET_ID is already live" >&2; exit 1; }
+
+RELEASE="$RELEASES_DIR/releases/$TARGET_ID"
+sha_of() { sed -n 1p "$RELEASES_DIR/releases/$1/.git-deploy-commit" 2> /dev/null || true; }
+oldrev=$(sha_of "$LIVE_ID") newrev=$(sha_of "$TARGET_ID")
+
+tmp="$WORKTREE.new.$$"
+ln -s "$RELEASE" "$tmp"
+mv -T "$tmp" "$WORKTREE"
+echo "git-deploy-rollback: $WORKTREE now serves release $TARGET_ID (was $LIVE_ID)"
+
+STATUS=success
+if [[ -f "$RELEASE/deploy.conf" ]]; then
+  set +e
+  (
+    set -e
+    cd "$RELEASE"
+    export WORKTREE BRANCH GIT_DIR RELEASE RELEASES_DIR oldrev newrev
+    # shellcheck source=/dev/null
+    source "$RELEASE/deploy.conf"
+    if declare -f deploy_rollback > /dev/null; then
+      echo "git-deploy-rollback: running deploy_rollback"
+      deploy_rollback
+    else
+      echo "git-deploy-rollback: deploy.conf has no deploy_rollback(); nothing restarted (deploy_restart is never run for a rollback)" >&2
+    fi
+  )
+  [[ $? -eq 0 ]] || STATUS=failed
+  set -e
+fi
+
+printf '{"event":"rollback","time":"%s","branch":"%s","commit":"%s","prev_commit":"%s","status":"%s","release":"%s"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BRANCH" "$newrev" "$oldrev" "$STATUS" "$TARGET_ID" >> "$GIT_DIR/deploy.jsonl"
+[[ "$STATUS" == success ]] || { echo "git-deploy-rollback: deploy_rollback failed; $TARGET_ID is live anyway" >&2; exit 1; }

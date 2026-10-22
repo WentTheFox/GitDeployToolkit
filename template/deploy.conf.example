@@ -51,6 +51,27 @@ deploy_restart() {
 #   esac
 # }
 
+# --- Release directories (RELEASES=1 in deploy.env) -------------------
+# See README "Release directories". The app builds in $RELEASE while the
+# old release keeps serving; the toolkit swaps the symlink between
+# deploy_build and deploy_restart. List what must outlive a release:
+#
+# SHARED=(.env storage)
+#
+# deploy_build() {
+#   composer install --no-dev      # cwd is the new release
+#   npm ci && npm run build
+# }
+# deploy_restart() {
+#   php artisan migrate --force     # after the swap
+#   sudo systemctl reload php8.3-fpm
+# }
+# # Only for a rollback: restart for the release being returned to. Never
+# # migrate here. Without it, git-deploy-rollback just swaps the symlink.
+# deploy_rollback() {
+#   sudo systemctl reload php8.3-fpm
+# }
+
 # Notes on sudo:
 # deploy_restart commands that need root (systemctl, etc.) require the
 # deploy user to have passwordless sudo for exactly that command. See

@@ -68,12 +68,24 @@ def within(path, root):
 
 
 def check_worktree(worktree):
+    """Return (name, roots): the path to write into the policy, and the real
+    directories a log may live under.
+
+    An app deployed with release directories (RELEASES=1, docs/releases.md)
+    has a symlink as its worktree, pointing at <base>/releases/<id>. The
+    policy must name the symlink (the real path changes every deploy), and
+    its logs may also live in <base>/shared, which every release links to.
+    <base> is derived from where the symlink points, never taken from the
+    caller."""
     if not PATH_RE.match(worktree) or ".." in worktree.split("/"):
         raise Refused("unsafe worktree path")
     real = os.path.realpath(worktree)
     if not any(within(real, r) and real != r for r in allowed_roots()):
         raise Refused("worktree is not inside an allowed root (%s)" % ", ".join(allowed_roots()))
-    return real
+    parent = os.path.dirname(real)
+    if os.path.islink(worktree) and os.path.basename(parent) == "releases":
+        return worktree, [real, os.path.realpath(os.path.join(os.path.dirname(parent), "shared"))]
+    return real, [real]
 
 
 def non_root_user(name):
@@ -151,7 +163,7 @@ def parse(text, app, worktree):
     return stanzas
 
 
-def check_stanza(st, worktree):
+def check_stanza(st, roots):
     d = st["dirs"]
     where = "stanza at line %d" % st["line"]
     if "su" not in d:
@@ -164,7 +176,7 @@ def check_stanza(st, worktree):
             raise Refused("%s: unsafe path %s" % (where, p))
         if ".." in p.split("/") or base in ("", ".", ".."):
             raise Refused("%s: unsafe path %s" % (where, p))
-        if not within(os.path.realpath(directory), worktree):
+        if not any(within(os.path.realpath(directory), r) for r in roots):
             raise Refused("%s: %s is outside the worktree" % (where, p))
     return st
 
@@ -210,9 +222,9 @@ def validate(content, target_name):
 def cmd_report_or_install(mode, app, worktree):
     if not NAME_RE.match(app):
         raise Refused("bad app name")
-    worktree = check_worktree(worktree)
+    worktree, roots = check_worktree(worktree)
     text = sys.stdin.read()
-    stanzas = [check_stanza(s, worktree) for s in parse(text, app, worktree)]
+    stanzas = [check_stanza(s, roots) for s in parse(text, app, worktree)]
     if mode == "report":
         # One line per log file, worktree path included: the caller's public
         # log masks it like any other server path. stdout is the same data

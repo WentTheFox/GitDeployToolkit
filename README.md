@@ -457,6 +457,12 @@ List the units a deploy may touch in `/etc/git-deploy/services`
 (`reload php*-fpm.service`). Full design, what the rules allow and the
 migration runbook for an existing server: `docs/deploy-user.md`.
 
+`--deploy-user` also installs a `pm2` wrapper at `/usr/local/bin/pm2` that runs
+pm2 as the deploy user for everyone else, so `pm2 list` as your admin login (or
+`ssh host pm2 list`) shows the apps instead of starting a second, empty daemon. It
+is a wrapper rather than an alias because an alias would not apply to
+`ssh host pm2 ...`. `sudo git-deploy-check` audits the whole setup, read-only.
+
 Without `--deploy-user` nothing about sudo is touched and you scope it
 yourself, e.g. `/etc/sudoers.d/git-deploy-myapp`:
 `deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart php-fpm-myapp`.

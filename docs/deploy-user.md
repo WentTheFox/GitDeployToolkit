@@ -63,8 +63,12 @@ git-deploy: push REJECTED — you pushed as 'admin', but this server deploys as 
 ```
 
 So a forgotten clone still pointing at the old admin login fails loudly. The
-bare repos are also owned by `deploy`, so the old login usually cannot write
-them directly either; the hook is for the clear message. The GitHub webhook path does not push and is unaffected.
+bare repos are also owned by `deploy`, so git itself usually stops the old
+login first, with `fatal: detected dubious ownership in repository at
+'/srv/git/<app>.git'` and no hint about the right URL. Either way the push
+fails and nothing deploys; the hook's message only appears where the old user
+can still open the repo (a shared group, or a repo migrated without the
+chown). The GitHub webhook path does not push and is unaffected.
 
 ## Migrating a server (runbook)
 
@@ -109,10 +113,13 @@ pm2 process restarts once, and each app is briefly owned by someone mid-move.
 6. **Point your clones at the new user** (every local copy, every machine):
    `git remote set-url deploy ssh://deploy@<host>/srv/git/<app>.git`.
    Any clone you miss is rejected by `pre-receive` with the line above.
-7. **Lock down**: remove `OLD`'s `NOPASSWD:ALL` (keep a password-protected or
-   key-guarded admin path first; test `sudo -n true` fails and `sudo -v` works
-   in a second session *before* closing the first). Remove `OLD`'s own
-   `git-deploy-*` sudoers files.
+7. **Retire the old deploy role.** The old login stays your admin account and
+   keeps its own sudo: with a key-only login and no password, taking its
+   `NOPASSWD:ALL` away would lock you out of sudo. What changed is that nothing
+   deploys as it any more. Remove its now-redundant `git-deploy-cron` and
+   `git-deploy-logrotate` sudoers files, the `pm2-OLD` logrotate file, and its
+   old pm2 home (keep `dump.pm2` until the next reboot has proven
+   `pm2-deploy.service`).
 
 Rollback: until step 7, re-point `/etc/git-deploy/user` and the units at `OLD`.
 

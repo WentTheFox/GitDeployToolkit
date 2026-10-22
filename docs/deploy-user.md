@@ -102,13 +102,22 @@ pm2 process restarts once, and each app is briefly owned by someone mid-move.
      has `www-data`-owned `storage/` etc., chown only what `OLD` owned
      (`find <wt> -user OLD -exec chown deploy {} +` with `-xdev`), then run
      `git-deploy-fixperms` once per Laravel app.
+   - **Release directories (`RELEASES=1`):** also re-own `<worktree>.d/` (releases
+     and `shared/`) and the worktree symlink itself (`chown -h`), and make the
+     directory that *contains* the worktree symlink (`/var/www`, `/var/node`)
+     writable by `deploy`: the swap creates its temporary link there, and a
+     parent still owned by the old login fails the deploy at `swap_release`
+     (safely: the old release keeps serving).
    - `chown root:deploy /etc/git-deploy/webhook.env` (mode 640);
      `systemctl disable --now git-deploy-webhook@OLD && systemctl enable --now git-deploy-webhook@deploy`.
    - Move `OLD`'s deploy-related home files the deploy needs (pm2 dump is
      regenerated; the GitHub deploy-key clone of the toolkit is root's).
-5. **Verify before locking down**: for each app, `sudo -u deploy` runs a
+5. **Verify**: for each app, `sudo -u deploy` runs a
    same-commit redeploy (`echo "$sha $sha refs/heads/main" | …/post-receive`
-   from the bare repo) and the app still serves; one real `git push deploy`;
+   from the bare repo) and the app still serves. Run that as
+   `ssh deploy@host` (or `sudo -iu deploy`), not `sudo -u deploy` from the old
+   login: that leaks `SUDO_USER=<old login>` into the hook, and the cron
+   helper then reports the old login as the deploy user; one real `git push deploy`;
    one webhook button deploy.
 6. **Point your clones at the new user** (every local copy, every machine):
    `git remote set-url deploy ssh://deploy@<host>/srv/git/<app>.git`.

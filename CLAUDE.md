@@ -293,8 +293,7 @@ and the reasoning for every choice is `docs/releases.md`; usage is README
 "Release directories". `bin/git-deploy-releases-init` converts a live app
 (a moment of downtime: a directory can't be atomically replaced by a
 symlink); `bin/git-deploy-rollback` re-points the symlink and runs
-`deploy_rollback()`. Tested in `tests/run.sh` (mutation-checked); **no app
-has adopted it yet**.
+`deploy_rollback()`. Tested in `tests/run.sh` (mutation-checked); **SledgeHammerTime (prod + beta) adopted it on 2026-10-22**.
 
 Non-obvious decisions, don't undo without a reason:
 - **Rollback never runs `deploy_restart()`**: that usually migrates. It
@@ -320,12 +319,14 @@ Until now each server's "deploy user" was the admin login (`NOPASSWD:ALL`,
 owner of pm2, bare repos, worktrees, webhook listener). The user asked for a
 dedicated unprivileged `deploy` user with sudoers only for what deploys need.
 Design and the per-server migration runbook: `docs/deploy-user.md`.
-Implemented in the toolkit and tested. **Status (2026-10-22): the first VPS
-is fully migrated** (user, sudoers, pm2 daemon + `pm2-deploy` unit proven by
+Implemented in the toolkit and tested. **Status (2026-10-22): both VPSes are
+fully migrated** (user, sudoers, pm2 daemon + `pm2-deploy` unit proven by
 kill + start, webhook listener, bare-repo and worktree ownership, local remotes
-all moved to `deploy`; all ten apps verified with a real deploy as it).
-The second VPS is not started. See
-`servers.local.yml`. The old admin login keeps its own sudo on purpose (see
+all moved to `deploy`; every app verified with a real deploy as it). The
+second VPS surfaced two things worth knowing: its Laravel apps had adopted
+`RELEASES=1` (a release's `storage` is a link into `shared/`, see the fixperms
+note below) and `/var/www`/`/var/node` themselves were owned by the old login,
+which the release swap needs writable (runbook step 4). See `servers.local.yml`. The old admin login keeps its own sudo on purpose (see
 the runbook's step 7).
 
 Non-obvious decisions, don't undo without a reason:

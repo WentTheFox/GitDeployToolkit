@@ -321,12 +321,10 @@ owner of pm2, bare repos, worktrees, webhook listener). The user asked for a
 dedicated unprivileged `deploy` user with sudoers only for what deploys need.
 Design and the per-server migration runbook: `docs/deploy-user.md`.
 Implemented in the toolkit and tested. **Status (2026-10-22): the first VPS
-is migrated** (user, sudoers, pm2 daemon + units, webhook listener, bare-repo
-and worktree ownership, local remotes all moved to `deploy`; eight of ten
-apps verified with a real deploy as it). Still open there: Luna and
-Winterchilla (their ported `deploy.conf` is on GitHub but not deployed,
-because a push would also ship unrelated pending commits — the user decides),
-the `pm2-deploy` unit proven by a reboot. The second VPS is not started. See
+is fully migrated** (user, sudoers, pm2 daemon + `pm2-deploy` unit proven by
+kill + start, webhook listener, bare-repo and worktree ownership, local remotes
+all moved to `deploy`; all ten apps verified with a real deploy as it).
+The second VPS is not started. See
 `servers.local.yml`. The old admin login keeps its own sudo on purpose (see
 the runbook's step 7).
 

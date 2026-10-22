@@ -416,7 +416,8 @@ touches what is being served (the half-built release is deleted), and
   runs after the swap. `$RELEASE` also exists in-place (equal to
   `$WORKTREE`), so one `deploy.conf` works either way.
 - **Converting an app that is deployed in place:** `git-deploy-releases-init
-  <app> .env storage` once, by hand, at a quiet moment. A directory can't be
+  <app> .env storage` once, by hand (list every untracked file the app needs,
+  e.g. `setup/deploy-config.sh`, or releases won't have it), at a quiet moment. A directory can't be
   replaced by a symlink atomically, so that one step has a moment of
   downtime; every deploy after it is atomic. It sets `RELEASES=1` for you.
   A brand-new app just adds `RELEASES=1` to `deploy.env` and creates
@@ -431,7 +432,9 @@ touches what is being served (the half-built release is deleted), and
   symlink, and logs may live under `shared/` (e.g. `storage/logs`) or in the
   release.
 - **Still the app's job:** a php-fpm reload (or `opcache.revalidate_path=1`)
-  after the swap, which needs a sudoers rule for that one command;
+  after the swap, which needs a sudoers rule for that one command (and
+  `process_control_timeout = 10s` in the php-fpm global config, or the reload
+  resets in-flight requests);
   expand-only migrations; fork-mode pm2 restarts still have a gap
   (`pm2 reload` only helps cluster/`wait_ready` apps).
 

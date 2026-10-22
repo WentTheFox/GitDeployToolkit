@@ -818,12 +818,14 @@ check "...and is left untouched" bash -c "[ ! -L '$T/www/rel2' ] && [ -f '$T/www
 GIT_DEPLOY_LIB="$ROOT/share" "$ROOT/bin/git-deploy-new" rel3 "$T/www/rel3" > /dev/null
 (cd reldev && git push -q "$T/srv/rel3.git" main > /dev/null 2>&1) || true
 echo SECRET3 > "$T/www/rel3/.env"; mkdir -p "$T/www/rel3/storage"; echo user > "$T/www/rel3/storage/upload.txt"
+mkdir -p "$T/www/rel3/setup"; echo cfg > "$T/www/rel3/setup/local.sh"
 check "init refuses a missing shared path" bash -c "! '$ROOT/bin/git-deploy-releases-init' --yes rel3 nope > /dev/null 2>&1"
-"$ROOT/bin/git-deploy-releases-init" --yes rel3 .env storage > /dev/null 2>&1
+"$ROOT/bin/git-deploy-releases-init" --yes rel3 .env storage setup/local.sh > /dev/null 2>&1
 check "init made the worktree a symlink" test -L "$T/www/rel3"
 check "init kept the checkout" test -f "$T/www/rel3/deploy.conf"
 check "init moved shared state out of the release" bash -c "[ \"\$(cat '$T/www/rel3.d/shared/.env')\" = SECRET3 ] && [ -f '$T/www/rel3.d/shared/storage/upload.txt' ]"
 check "init linked it back" bash -c "[ -L '$T/www/rel3/.env' ] && [ \"\$(cat '$T/www/rel3/storage/upload.txt')\" = user ]"
+check "init handles an untracked file in a subdirectory" bash -c "[ -L '$T/www/rel3/setup/local.sh' ] && [ \"\$(cat '$T/www/rel3/setup/local.sh')\" = cfg ] && [ -f '$T/www/rel3.d/shared/setup/local.sh' ]"
 check "init switched deploy.env to RELEASES=1" grep -qx RELEASES=1 "$T/srv/rel3.git/deploy.env"
 check "init refuses to run twice" bash -c "! '$ROOT/bin/git-deploy-releases-init' --yes rel3 .env > /dev/null 2>&1"
 rcommit "after init" > /dev/null

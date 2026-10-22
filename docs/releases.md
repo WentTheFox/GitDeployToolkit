@@ -90,6 +90,14 @@ Agreed with the first app that wants this (2026-10-22). It is app-side
 - **php-fpm opcache.** After the swap, either `opcache.revalidate_path=1` or a
   graceful `systemctl reload php*-fpm` is needed. The deploy user has no
   sudoers rule for that today; `install.sh` prints a suggested one.
+- **php-fpm reload drops in-flight requests unless told to wait.** Measured
+  by the first adopter with a 50 ms read monitor: `systemctl reload` (USR2)
+  reset 3 in-flight requests until `process_control_timeout = 10s` was set in
+  the php-fpm global config (`php-fpm.conf`, `[global]`). Set it next to the
+  sudoers rule.
+- **A successful `git push` does not mean a successful deploy** (git ignores
+  `post-receive`'s exit status; true in-place too). Anything that waits on a
+  deploy must read the last `complete` line of `deploy.jsonl`.
 - **Migrations.** They run against one database shared by the old and new
   release. They must be expand-only relative to the previous release (add
   nullable/defaulted columns, drop in a later release). A read-only window
@@ -114,6 +122,12 @@ Each needs a deliberate decision before implementing:
 | Discord/GitHub notices | mask `$WORKTREE` | the default `<base>` is `$WORKTREE.d`, so the existing prefix masking covers it; a custom `RELEASES_DIR` is masked explicitly. **Not covered by a test through the webhook**: check a public deployment log once before opting in an app with a public repo |
 
 ## Migrating an existing app
+
+Pass every path the app's `SHARED=()` lists, including untracked files in
+subdirectories (e.g. `.env storage setup/deploy-config.sh`): anything untracked
+and not shared is missing from every release, since a release is a fresh
+checkout. `git-deploy-releases-init` creates the parent directories under
+`shared/` itself.
 
 `WORKTREE` is a real directory today and a rename cannot replace a non-empty
 directory, so the **one-time conversion has a sub-second gap** (move the

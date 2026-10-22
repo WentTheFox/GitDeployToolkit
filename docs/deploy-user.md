@@ -92,7 +92,12 @@ pm2 process restarts once, and each app is briefly owned by someone mid-move.
    (and `vendor`), `sudo -n …/git-deploy-service restart X.service`. Push those
    as `OLD` while that still works. A `deploy.conf` that still calls
    `sudo systemctl` or `sudo chmod` fails under `deploy` with a sudo error.
-   Update `deploy.cron` entries that run as `OLD` to run as `deploy`.
+   Update `deploy.cron` entries that run as `OLD` to run as `deploy`, **and
+   every `su OLD OLD` line in `deploy.logrotate`** (pm2 log stanzas) to
+   `su deploy deploy`. A stale `su` is not a deploy failure: the helper accepts
+   it, and logrotate only fails at night, when the old login can no longer
+   write the now `deploy`-owned log directories. Check with
+   `sudo -u OLD test -w <log dir>` for every stanza after the ownership move.
 4. **Move ownership** (per app, then the server-wide pieces):
    - `pm2 save` and `pm2 kill` as `OLD`; `systemctl disable pm2-OLD`; as
      `deploy` start the apps from their `pm2.json`/ecosystem files, `pm2 save`,

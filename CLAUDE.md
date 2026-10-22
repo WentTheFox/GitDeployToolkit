@@ -351,6 +351,12 @@ Non-obvious decisions, don't undo without a reason:
   `/etc/sudoers.d/git-deploy` (validated with `visudo -cf`; refuses to
   overwrite on failure); a plain re-run / `git-deploy-update` reuses the
   recorded name. Without the flag sudo is untouched (old behavior).
+- **`deploy.logrotate` `su` lines are part of the port** (found a day late on
+  both VPSes: eight pm2/bot repos still said `su <old login> <old login>`, which
+  the helper accepts, so nothing failed until logrotate would have run that
+  night). `www-data` stanzas were unaffected. Idea not built: have the helper
+  refuse or warn when `su` names a user other than the deploy user or www-data,
+  like `cron.users` does for cron.
 - Every local clone's `deploy` remote must be switched to
   `ssh://deploy@<host>/srv/git/<app>.git` (clone paths are in
   `servers.local.yml`); a missed one fails on `pre-receive`.
